@@ -229,6 +229,7 @@ fn test_run_all_files(files: Vec<DirEntry>) {
                 if let Err(comparison_error) = file_differences {
                     let file_difference_count = comparison_error.differences.len();
                     println!("❌ Tabular records differ for file: {} - difference count is {}", file_name, file_difference_count);
+                    maybe_dump_differences(file_name, &comparison_error);
                     difference_count += file_difference_count;
                 } else {
                     println!("✅ Tabular records match for file: {}", file_name);
@@ -239,6 +240,7 @@ fn test_run_all_files(files: Vec<DirEntry>) {
                 if let Err(comparison_error) = file_differences {
                     let file_difference_count = comparison_error.differences.len();
                     println!("❌ Non-tabular records differ for file: {} - difference count is {}", file_name, file_difference_count);
+                    maybe_dump_differences(file_name, &comparison_error);
                     difference_count += file_difference_count;
                 } else {
                     println!("✅ Non-tabular records match for file: {}", file_name);
@@ -272,6 +274,28 @@ fn test_run_all_files(files: Vec<DirEntry>) {
         difference_count, 0,
         "Total difference count: {difference_count} out of total {field_count} fields compared",
     );
+
+    fn maybe_dump_differences(file_name: &str, error: &compare::FileComparisonError) {
+        let target = match std::env::var("HEM_DUMP") {
+            Ok(t) if !t.is_empty() && file_name.contains(&t) => t,
+            _ => return,
+        };
+        let _ = target;
+        if let compare::FileDifferences::List(differences) = &error.differences {
+            for d in differences {
+                println!(
+                    "DUMP\t{}\tline={}\tcol={}\t{}",
+                    file_name,
+                    d.line_number,
+                    d.column_field.as_deref().unwrap_or("<none>"),
+                    d.difference
+                );
+            }
+        }
+        for w in &error.warnings {
+            println!("DUMPWARN\t{}\t{}", file_name, w);
+        }
+    }
 
     fn use_additional_options(file: &DirEntry) -> bool {
         !file
