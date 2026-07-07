@@ -397,8 +397,10 @@ fn dense_output(t: f64, t_old: f64, h: f64, y_old: &[f64], q: &[[f64; 4]]) -> Ve
 }
 
 /// Root-finder matching `scipy.optimize.brentq` (Zeros/brentq.c). Used to
-/// localize events on the dense-output interpolant, exactly as scipy does.
-fn brentq(
+/// localize events on the dense-output interpolant, exactly as scipy does,
+/// and to solve the ventilation internal-reference-pressure mass balance
+/// (scipy.optimize.root_scalar with the default brentq method).
+pub(crate) fn brentq(
     mut f: impl FnMut(f64) -> f64,
     xa: f64,
     xb: f64,

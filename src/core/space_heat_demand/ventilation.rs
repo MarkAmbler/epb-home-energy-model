@@ -6,6 +6,7 @@ use crate::core::controls::time_control::{Control, ControlBehaviour};
 use crate::core::ductwork::Ductwork;
 use crate::core::energy_supply::energy_supply::{EnergySupply, EnergySupplyConnection};
 use crate::core::material_properties::AIR;
+use crate::core::solvers::brentq;
 use crate::core::space_heat_demand::building_element::{pitch_class, HeatFlowDirection};
 use crate::core::units::{
     celsius_to_kelvin, Orientation360, LITRES_PER_CUBIC_METRE, MILLIMETRES_IN_METRE,
@@ -2990,38 +2991,6 @@ impl CostFunction for FindRVArgProblem<'_> {
     }
 }
 
-struct ImplicitMassBalanceProblem<'a> {
-    wind_speed: f64,
-    wind_direction: Orientation360,
-    temp_interior_air: f64,
-    temp_exterior_air: f64,
-    r_v_arg: f64,
-    r_w_arg: Option<f64>,
-    simtime: SimulationTimeIteration,
-    infiltration_ventilation: &'a InfiltrationVentilation,
-}
-
-impl CostFunction for ImplicitMassBalanceProblem<'_> {
-    type Param = f64;
-    type Output = f64;
-
-    fn cost(&self, p_z_ref: &Self::Param) -> Result<Self::Output, Error> {
-        let cost = self
-            .infiltration_ventilation
-            .implicit_mass_balance_for_internal_reference_pressure(
-                *p_z_ref,
-                self.wind_speed,
-                self.wind_direction,
-                self.temp_interior_air,
-                self.temp_exterior_air,
-                self.r_v_arg,
-                self.r_w_arg,
-                None,
-                self.simtime,
-            )?;
-        Ok(cost)
-    }
-}
 
 fn root_scalar_for_implicit_mass_balance(
     infiltration_ventilation: &InfiltrationVentilation,
@@ -3034,34 +3003,47 @@ fn root_scalar_for_implicit_mass_balance(
     simtime: SimulationTimeIteration,
     bracket: (f64, f64),
 ) -> Result<f64, &'static str> {
-    let problem = ImplicitMassBalanceProblem {
-        wind_speed,
-        wind_direction,
-        temp_interior_air,
-        temp_exterior_air,
-        r_v_arg,
-        r_w_arg,
-        simtime,
-        infiltration_ventilation,
-    };
-
-    let tol = 0.;
-
     let (min, max) = bracket;
-    let solver = BrentRoot::new(min, max, tol);
 
-    let executor = Executor::new(problem, solver);
-    let res = executor.run();
-
-    let best_p_z_ref = match res {
-        Ok(res) => res.state().best_param,
-        Err(_) => return Err("Error calculating root for implicit mass balance"),
+    // Mass-balance residual as a function of the internal reference pressure.
+    let residual = |p_z_ref: f64| -> f64 {
+        infiltration_ventilation
+            .implicit_mass_balance_for_internal_reference_pressure(
+                p_z_ref,
+                wind_speed,
+                wind_direction,
+                temp_interior_air,
+                temp_exterior_air,
+                r_v_arg,
+                r_w_arg,
+                None,
+                simtime,
+            )
+            .expect("implicit mass balance evaluation failed")
     };
 
-    match best_p_z_ref {
-        Some(p_z_ref) => Ok(p_z_ref),
-        None => Err("No best_param in result"),
+    // Python solves this with scipy.optimize.root_scalar using its default
+    // brentq method over the bracket, which requires a sign change across the
+    // interval and otherwise raises (caught by the caller, which then widens
+    // the interval). Mirror that: bail unless the bracket brackets a root, so
+    // the caller advances to the next interval expansion.
+    let f_min = residual(min);
+    let f_max = residual(max);
+    if f_min == 0. {
+        return Ok(min);
     }
+    if f_max == 0. {
+        return Ok(max);
+    }
+    if f_min * f_max > 0. {
+        return Err("Bracket does not contain a sign change for implicit mass balance");
+    }
+
+    // scipy.optimize.brentq defaults: xtol = 2e-12, rtol = 4 * eps, maxiter = 100.
+    const XTOL: f64 = 2e-12;
+    const RTOL: f64 = 8.881784197001252e-16; // 4 * f64::EPSILON
+    const MAX_ITER: usize = 100;
+    Ok(brentq(residual, min, max, XTOL, RTOL, MAX_ITER))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
