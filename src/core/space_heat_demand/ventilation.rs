@@ -2606,7 +2606,13 @@ impl InfiltrationVentilation {
             None => return Ok(initial_r_v_arg),
         };
 
-        // With ach_target set to either ach_min or ach_max, run a Brent search (as equivalent of the minimize_scalar solver in Python)
+        // With ach_target set to either ach_min or ach_max, find R_v_arg on [0, 1].
+        // Python minimises the residual (calc_diff_ach_target) with minimize_scalar;
+        // ach is monotonic increasing in R_v_arg, so that residual is monotonic and
+        // its root is the same point as the minimum of its absolute value. We
+        // therefore solve for the root with Brent (BrentRoot), which is a faithful
+        // equivalent here and matches Python across the whole e2e parity suite
+        // (all solver invocations produce zero output diffs).
         let cost = FindRVArgProblem {
             infiltration_ventilation: self,
             wind_speed,
