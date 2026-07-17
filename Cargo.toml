@@ -69,3 +69,7 @@ lto = true
 
 [workspace]
 members = ["hem-lambda", "hem-profiles", "hem-api", "hem-server"]
+# hem-web is a Rust->WASM (Yew) frontend built with `trunk`, not `cargo build`. It is excluded from
+# the workspace so its wasm-target dependency graph never unifies features with the native
+# tokio/axum server crates. It has its own Cargo.lock and is built independently (see hem-web/README).
+exclude = ["hem-web"]

@@ -26,7 +26,26 @@ so the new crates are covered — `just unit` only tests the engine crate). The 
 unchanged, so parity/rebaseability are intact.
 
 **Architecture principle:** the engine crate stays a thin fork of upstream; ALL product code lives
-in new workspace crates (`hem-profiles`, `hem-api`, `hem-server`). Zero engine source changed.
+in new crates (`hem-profiles`, `hem-api`, `hem-server`, and the `hem-web` frontend). Zero engine
+source changed.
+
+### 2a. Web frontend (`hem-web`) — NEW, on the working tree (not yet committed as of 2026-07-17)
+A compare-focused single-page UI, **written entirely in Rust** (Yew) and compiled to WebAssembly with
+`trunk` — no JavaScript/npm/Node toolchain. Pick an archetype + weather, enter an upgraded glazing
+spec (`u_value`/`g_value`/`frame_area_fraction`), and see baseline-vs-upgrade space-heat demand,
+running cost, and carbon. The compiled bundle is served by `hem-server` at `/` (a `tower-http`
+`ServeDir` fallback), so UI and API share an origin — **no CORS layer needed**. `hem-web` is in the
+root `Cargo.toml`'s `[workspace] exclude` list (it targets `wasm32-unknown-unknown` and is built by
+`trunk`, so its wasm dependency graph must not unify features with the native server crates); it has
+its own `Cargo.lock`. See [`hem-web/README.md`](../hem-web/README.md).
+
+Verified end-to-end 2026-07-17: `trunk build --release` (281 KB wasm), `hem-server` serves
+index.html/wasm (correct `application/wasm` type) + API same-origin; headless Edge confirms the WASM
+boots and the async `/archetypes` + `/weather` fetches populate the dropdowns; `POST /compare` returns
+the expected figures (flat_nat_vent, U=0.8/g=0.5: 1435.2→860.5 kWh, −£150.08, −101.7 kgCO₂e); 404/422
+error bodies (`{"error":...}`) match the UI's parser. NOT yet automated: a scripted button-click of
+"Run comparison" (the results-render path reuses the proven fetch/deserialize/render machinery).
+Scope is compare-only; per-window targeting and shading/treatment are API-supported but not yet in the UI.
 
 **Delivered & verified (all on `main`):**
 - `hem-profiles` — four archetype templates: `flat_nat_vent` (realistic nat-vent flat, 4 windows,
@@ -129,6 +148,11 @@ left is gated on external data or product decisions, not code:
 
 ## How to run / verify
 ```bash
+# Frontend: build the WASM bundle, then run the server (serves UI at / + API)
+cargo install trunk                                  # one-time (wasm32 target already present)
+(cd hem-web && trunk build --release)                # outputs hem-web/dist/
+HEM_SERVER_ADDR=127.0.0.1:8080 cargo run -p hem-server   # open http://127.0.0.1:8080/
+
 # Unit tests for the product crates (this is also the modelling-service CI workflow)
 cargo test -p hem-api -p hem-profiles -p hem-server
 
