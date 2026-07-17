@@ -29,7 +29,7 @@ unchanged, so parity/rebaseability are intact.
 in new crates (`hem-profiles`, `hem-api`, `hem-server`, and the `hem-web` frontend). Zero engine
 source changed.
 
-### 2a. Web frontend (`hem-web`) — NEW, on the working tree (not yet committed as of 2026-07-17)
+### 2a. Web frontend (`hem-web`) — MERGED TO MAIN (PR #9, merge commit b759bafd, 2026-07-17)
 A compare-focused single-page UI, **written entirely in Rust** (Yew) and compiled to WebAssembly with
 `trunk` — no JavaScript/npm/Node toolchain. Pick an archetype + weather, enter an upgraded glazing
 spec (`u_value`/`g_value`/`frame_area_fraction`), and see baseline-vs-upgrade space-heat demand,
@@ -40,12 +40,13 @@ root `Cargo.toml`'s `[workspace] exclude` list (it targets `wasm32-unknown-unkno
 its own `Cargo.lock`. See [`hem-web/README.md`](../hem-web/README.md).
 
 Verified end-to-end 2026-07-17: `trunk build --release` (281 KB wasm), `hem-server` serves
-index.html/wasm (correct `application/wasm` type) + API same-origin; headless Edge confirms the WASM
-boots and the async `/archetypes` + `/weather` fetches populate the dropdowns; `POST /compare` returns
-the expected figures (flat_nat_vent, U=0.8/g=0.5: 1435.2→860.5 kWh, −£150.08, −101.7 kgCO₂e); 404/422
-error bodies (`{"error":...}`) match the UI's parser. NOT yet automated: a scripted button-click of
-"Run comparison" (the results-render path reuses the proven fetch/deserialize/render machinery).
-Scope is compare-only; per-window targeting and shading/treatment are API-supported but not yet in the UI.
+index.html/wasm (correct `application/wasm` type) + API same-origin; headless Edge (DevTools Protocol)
+confirms the WASM boots, the async `/archetypes` + `/weather` fetches populate the dropdowns, AND
+clicking "Run comparison" renders the expected figures (flat_nat_vent, U=0.8/g=0.5: 1435.2→860.5 kWh,
+−£150.08, −101.7 kgCO₂e); 404/422 error bodies (`{"error":...}`) match the UI's parser. CI: the
+`modelling-service.yml` workflow gained a `build_frontend` job (`trunk build --release`) so the
+frontend is covered — all three checks green on PR #9. Scope is compare-only; per-window targeting
+and shading/treatment are API-supported but not yet in the UI.
 
 **Delivered & verified (all on `main`):**
 - `hem-profiles` — four archetype templates: `flat_nat_vent` (realistic nat-vent flat, 4 windows,
