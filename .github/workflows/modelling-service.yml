@@ -17,3 +17,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p hem-api -p hem-profiles -p hem-server
+
+  # The hem-web frontend is a Rust->WASM (Yew) crate excluded from the workspace (it targets
+  # wasm32-unknown-unknown and is bundled by trunk, not cargo build). Without this job it would be
+  # the one product crate with no CI — exactly how hem-lambda rotted into a non-compiling state.
+  # trunk fetches its own wasm-bindgen/wasm-opt at build time.
+  build_frontend:
+    name: Frontend (hem-web) build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hem-web
+      - name: Install trunk
+        run: curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf - -C "$HOME/.cargo/bin"
+      - name: Build WASM bundle
+        run: cd hem-web && trunk build --release

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>HEM glazing study</title>
+    <link data-trunk rel="rust" data-wasm-opt="s"/>
+    <style>
+        :root {
+            --bg: #f6f7f9;
+            --panel: #ffffff;
+            --ink: #1a1d21;
+            --muted: #5c6470;
+            --line: #e2e5ea;
+            --accent: #1f6feb;
+            --good: #1a7f47;
+            --bad: #b42318;
+            --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --muted: #9aa4b2;
+                --line: #262c35; --accent: #4d9dff; --good: #3fb950; --bad: #f85149;
+                --shadow: 0 1px 3px rgba(0,0,0,.4);
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; background: var(--bg); color: var(--ink);
+            font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        .wrap { max-width: 920px; margin: 0 auto; padding: 32px 20px 64px; }
+        header h1 { font-size: 22px; margin: 0 0 4px; }
+        header p { color: var(--muted); margin: 0 0 24px; }
+        .panel {
+            background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 20px; margin-bottom: 20px; box-shadow: var(--shadow);
+        }
+        .panel h2 { font-size: 15px; margin: 0 0 16px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+        label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 5px; }
+        input, select {
+            width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+            background: var(--bg); color: var(--ink); font-size: 14px;
+        }
+        input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+        .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+        button {
+            margin-top: 18px; padding: 10px 20px; border: none; border-radius: 7px;
+            background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+        }
+        button:disabled { opacity: .55; cursor: default; }
+        .err { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent);
+               border: 1px solid var(--bad); border-radius: 8px; padding: 12px 14px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: right; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+        th:first-child, td:first-child { text-align: left; }
+        thead th { color: var(--muted); font-weight: 600; font-size: 13px; }
+        .delta-row td { font-weight: 700; border-bottom: none; }
+        .pos { color: var(--good); }
+        .neg { color: var(--bad); }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap: 14px; margin-bottom: 18px; }
+        .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+        .card .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+        .card .v { font-size: 26px; font-weight: 700; margin-top: 4px; }
+        .card .u { font-size: 13px; color: var(--muted); }
+        .note { font-size: 12.5px; color: var(--muted); margin-top: 14px; }
+        details { margin-top: 14px; } summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+        .win-list { font-size: 13px; color: var(--muted); margin: 8px 0 0; padding-left: 18px; }
+    </style>
+</head>
+<body></body>
+</html>

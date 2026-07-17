@@ -17,17 +17,24 @@ use hem_api::{
 };
 use serde_json::json;
 use std::net::SocketAddr;
+use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+
+    // Static frontend (the hem-web Yew/WASM bundle). Served same-origin so the API calls need no
+    // CORS. `HEM_WEB_DIST` points at trunk's build output; unset ⇒ `hem-web/dist` (the layout when
+    // running from the workspace root). Directory requests fall back to index.html (SPA entry).
+    let web_dist = std::env::var("HEM_WEB_DIST").unwrap_or_else(|_| "hem-web/dist".to_string());
 
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/archetypes", get(list_archetypes))
         .route("/weather", get(list_weather_datasets))
         .route("/simulate", post(run_simulation))
-        .route("/compare", post(run_comparison));
+        .route("/compare", post(run_comparison))
+        .fallback_service(ServeDir::new(&web_dist));
 
     let addr: SocketAddr = std::env::var("HEM_SERVER_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
@@ -37,7 +44,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
-    tracing::info!("HEM modelling service listening on http://{addr}");
+    tracing::info!("HEM modelling service listening on http://{addr} (UI from {web_dist})");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
