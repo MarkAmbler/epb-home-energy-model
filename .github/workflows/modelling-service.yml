@@ -1,0 +1,19 @@
+on: [ push ]
+
+name: Modelling service
+
+# Covers the product crates (hem-profiles / hem-api / hem-server) that the engine's `test.yml`
+# does not: `just unit` is `cargo test --lib` on the engine crate only. Kept as a separate workflow
+# so the engine's CI stays untouched and rebaseable on upstream (design doc constraint C4).
+# Named packages are used deliberately — `hem-lambda` is a pre-existing broken crate, so
+# `--workspace` would fail; testing the three product crates by name avoids it.
+
+jobs:
+  test_product_crates:
+    name: Modelling service crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p hem-api -p hem-profiles -p hem-server
