@@ -35,6 +35,16 @@ const FLAT_NAT_VENT_JSON: &str = include_str!("../archetypes/flat_nat_vent.json"
 /// can pick "current new-build glazing" by name, NOT a surveyed dwelling and NOT a compliance run.
 const FLAT_NEW_BUILD_UK_JSON: &str = include_str!("../archetypes/flat_new_build_uk.json");
 
+/// An **illustrative** detached single-storey dwelling (bungalow), derived from the
+/// [`FLAT_NAT_VENT_JSON`] machinery by converting its party surfaces to external ones: party ceiling
+/// → flat roof, party floor → ground floor (parameters copied from the parity-tested `detached_demo`
+/// BRE input, area/perimeter scaled), party walls → external walls. Glazing at the current UK
+/// new-build standard (U=1.4, g=0.63). Fabricated aspects (element orientations/heights, ground
+/// perimeter, and the ventilation + occupancy/hot-water schedules inherited from the flat) make its
+/// figures INDICATIVE — it is not a surveyed dwelling and not a compliance calculation. Verified to
+/// run and to lose more heat than the flat (more external surface), as physically expected.
+const DETACHED_BUNGALOW_UK_JSON: &str = include_str!("../archetypes/detached_bungalow_uk.json");
+
 const ARCHETYPES: &[ArchetypeInfo] = &[
     ArchetypeInfo {
         id: "flat_nat_vent",
@@ -45,6 +55,11 @@ const ARCHETYPES: &[ArchetypeInfo] = &[
         id: "flat_new_build_uk",
         name: "Flat, current UK new-build glazing (illustrative)",
         description: "The nat-vent flat envelope with glazing at the current UK new-build standard (U=1.4 W/m²K, Approved Document L 2021; g=0.63 modern low-e double glazing). Opaque fabric already meets current Part L. Illustrative preset — not a surveyed dwelling, not a compliance calculation.",
+    },
+    ArchetypeInfo {
+        id: "detached_bungalow_uk",
+        name: "Detached bungalow, current UK values (illustrative)",
+        description: "Single-storey detached dwelling derived from the nat-vent flat by making its party surfaces external (roof, ground floor, external walls) with current UK fabric; glazing at U=1.4 W/m²K. Figures are INDICATIVE (fabricated geometry, ventilation/schedules inherited from the flat) — not a surveyed dwelling, not a compliance calculation.",
     },
     ArchetypeInfo {
         id: "detached_demo",
@@ -71,6 +86,7 @@ pub fn baseline(id: &str) -> Option<Value> {
     let raw = match id {
         "flat_nat_vent" => FLAT_NAT_VENT_JSON,
         "flat_new_build_uk" => FLAT_NEW_BUILD_UK_JSON,
+        "detached_bungalow_uk" => DETACHED_BUNGALOW_UK_JSON,
         "detached_demo" => DETACHED_DEMO_JSON,
         _ => return None,
     };
@@ -116,5 +132,29 @@ mod tests {
             }
         }
         assert_eq!(windows, 4, "the flat envelope has four windows");
+    }
+
+    /// The detached bungalow must have a genuinely external envelope: at least one ground-floor
+    /// element and a flat (pitch-0) opaque roof, with glazing at the current UK standard.
+    #[test]
+    fn detached_bungalow_has_external_envelope() {
+        let b = baseline("detached_bungalow_uk").expect("archetype exists");
+        let (mut grounds, mut roofs, mut windows) = (0, 0, 0);
+        for zone in b["Zone"].as_object().unwrap().values() {
+            for el in zone["BuildingElement"].as_object().unwrap().values() {
+                match el["type"].as_str() {
+                    Some("BuildingElementGround") => grounds += 1,
+                    Some("BuildingElementOpaque") if el["pitch"] == serde_json::json!(0) => roofs += 1,
+                    Some("BuildingElementTransparent") => {
+                        windows += 1;
+                        assert_eq!(el["u_value"], serde_json::json!(1.4));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(grounds >= 1, "a detached dwelling must have a ground floor");
+        assert!(roofs >= 1, "a detached dwelling must have a roof");
+        assert_eq!(windows, 4);
     }
 }

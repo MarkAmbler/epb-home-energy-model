@@ -47,6 +47,7 @@ bundles the CIBSE London weather used by the engine's parity harness.
 |----|-----------|
 | `flat_nat_vent` | Naturally-ventilated deck-access flat; 2 zones, 4 windows, 4380 h (~half year, heating season). Realistic for glazing studies. |
 | `flat_new_build_uk` | The same envelope with glazing at the current UK new-build standard (U=1.4 W/m²K, Approved Document L 2021; g=0.63). **Illustrative preset**, not a surveyed dwelling. |
+| `detached_bungalow_uk` | Single-storey detached dwelling (derived from the flat by making its party surfaces external — roof, ground floor, external walls — at current UK fabric; glazing U=1.4). **Illustrative** — fabricated geometry and inherited ventilation/schedules, so figures are indicative, not a surveyed dwelling. |
 | `detached_demo` | Minimal single-zone demo, 8 timesteps. Fast test fixture — **figures are not physically meaningful.** |
 
 ### GET `/weather`

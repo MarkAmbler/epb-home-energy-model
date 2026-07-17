@@ -82,6 +82,16 @@ source, so parity is unaffected.
 3. ~~Shading/`treatment` overrides (blinds/curtains/overhangs — design doc §6.1).~~ **DONE**
    (treatment limited to control-free/fixed-`is_open` until an archetype carries `$.Control`
    scaffolding, or we add control injection).
+4b. Detached archetype — **DONE (illustrative).** Added `detached_bungalow_uk`: the `flat_nat_vent`
+   machinery with its party surfaces converted to external ones (party ceiling → flat roof; party
+   floor → ground floor with parameters copied from the parity-tested `detached_demo` BRE input,
+   area/perimeter scaled; party walls → external walls), glazing at U=1.4/g=0.63. Verified: runs,
+   loses more heat than the flat (1754.8 vs 1435.2 kWh — correct direction for more external
+   surface), and is insensitive to the fabricated ground perimeter (halving it moved heat 0.5%, so
+   the ground model is U-value-dominated, not perimeter-dominated). Figures INDICATIVE — fabricated
+   geometry (orientations/heights) and the ventilation + occupancy/hot-water schedules are inherited
+   from the flat. A faithful (surveyed) dwelling still needs real data (design doc D5).
+
 4. Illustrative archetype — **PARTIAL / DONE within constraints.** Added `flat_new_build_uk`: the
    `flat_nat_vent` envelope with glazing at the current UK new-build standard (whole-window U=1.4
    W/m²K, Approved Document L 2021 England, effective 15 Jun 2023; g=0.63 modern low-e double). A
