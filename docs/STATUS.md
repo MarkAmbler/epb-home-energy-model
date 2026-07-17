@@ -41,9 +41,18 @@ source, so parity is unaffected.
   charges excluded — they cancel in an A/B comparison). Engine-internal supplies
   (`_energy_from_environment`, `_unmet_demand`) are correctly zero-costed; a real fuel with no
   supplied factors is a 422.
+- **Per-window / by-orientation targeting** (design doc D4): `glazing_overrides` stays the global
+  default (all windows); `targeted_overrides: [{select:{names,orientations}, overrides}]` refine
+  specific windows, applied after the global with later rules winning per field. A `WindowSelector`
+  matches when every non-empty criterion matches (AND); empty = all. `compare` has
+  `baseline_targeted`/`upgrade_targeted`; `upgrade_overrides` is now optional (upgrade can be
+  expressed purely by targeting). Responses carry a `windows` inventory (zone/name/orientation/pitch)
+  so callers know what to target.
 - Live check: `flat_nat_vent`, as-built vs U=0.8/g=0.5 → space-heat demand 1435→861 kWh (~40% cut),
   cost −£150.08, carbon −101.7 kgCO₂e over the simulated period (4380 h — NOT a full year), correct
-  direction. 14 unit tests pass (`cargo test -p hem-api -p hem-profiles`).
+  direction. Targeting: all-4 windows U=0.8 → −735.1 kWh; 2 living-room windows only → −363.3 kWh
+  (~half, as expected); orientation `[90]` → all 4 (all face east). 22 unit tests pass
+  (`cargo test -p hem-api -p hem-profiles`).
 
 ## Strategic context (verified 2026-07-07)
 - HEM is NOT statutory yet: SAP **10.3** is the sole approved method at Future Homes Standard launch
@@ -57,10 +66,14 @@ source, so parity is unaffected.
   `hem-api` (local engine now, ECaaS later) — this is the recommended next architectural step.
 
 ## Recommended next steps
-1. ~~Cost & carbon figures in the `/compare` delta (not just kWh).~~ **DONE** (see above).
-2. Weather-by-location; per-window targeting; shading/`treatment` overrides.
-3. More realistic archetypes (a true full 8760-hour year; a detached house).
-4. Pluggable engine-backend trait in `hem-api` (local vs ECaaS) — deferred until ECaaS is concrete
+1. ~~Cost & carbon figures in the `/compare` delta (not just kWh).~~ **DONE**.
+2. ~~Per-window / by-orientation targeting (D4).~~ **DONE**.
+3. Shading/`treatment` overrides (blinds/curtains/overhangs — design doc §6.1).
+4. More realistic archetypes (a true full 8760-hour year; a detached house).
+5. **Weather-by-location — BLOCKED on data.** Repo bundles only London (CIBSE csv + EPW). The
+   selection mechanism + `GET /weather` is easy, but real multi-location needs sourced regional EPW
+   files (provenance/licensing is a user decision). Don't ship single-city dressed up as multi.
+6. Pluggable engine-backend trait in `hem-api` (local vs ECaaS) — deferred until ECaaS is concrete
    (its API shape is unknown, so abstracting against it now would be guesswork).
 
 ## Known issues

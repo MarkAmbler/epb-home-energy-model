@@ -11,8 +11,8 @@ use home_energy_model::output_writer::SinkOutputWriter;
 use home_energy_model::read_weather_file::cibse_weather_data_to_external_conditions;
 use home_energy_model::{run_project_from_input_file, RunInput};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Cursor};
 
 /// Bundled Phase 1 weather. The engine's e2e parity harness runs every core demo against exactly
@@ -66,6 +66,51 @@ impl GlazingOverrides {
         }
         Ok(())
     }
+}
+
+/// Selects which transparent elements a [`TargetedOverride`] applies to. An element matches when it
+/// satisfies **every non-empty** criterion (AND); an all-empty selector matches every window.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WindowSelector {
+    /// BuildingElement names to match, exact (e.g. `"living window W03"`). Empty ⇒ not filtered by name.
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// `orientation360` values to match (degrees). Empty ⇒ not filtered by orientation.
+    #[serde(default)]
+    pub orientations: Vec<f64>,
+}
+
+impl WindowSelector {
+    /// True if a window with this `name`/`orientation` satisfies every non-empty criterion.
+    fn matches(&self, name: &str, orientation: Option<f64>) -> bool {
+        let name_ok = self.names.is_empty() || self.names.iter().any(|n| n == name);
+        let orientation_ok = self.orientations.is_empty()
+            || orientation
+                .is_some_and(|o| self.orientations.iter().any(|t| (t - o).abs() < 1e-9));
+        name_ok && orientation_ok
+    }
+}
+
+/// Apply `overrides` only to the windows picked by `select`. Rules are applied after the global
+/// [`SimulateRequest::glazing_overrides`], in order, and later rules win per field — so a global
+/// upgrade can be refined for specific windows (e.g. "all windows to U=1.0, but the north face to
+/// U=0.8").
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TargetedOverride {
+    pub select: WindowSelector,
+    pub overrides: GlazingOverrides,
+}
+
+/// One transparent element in the assembled dwelling, so a caller knows what names/orientations
+/// exist to target with a [`WindowSelector`].
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowInfo {
+    pub zone: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orientation360: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f64>,
 }
 
 /// Engine output-detail switches, mirroring the engine's own flags.
@@ -154,8 +199,12 @@ pub struct CostCarbon {
 pub struct SimulateRequest {
     /// Archetype id (see `hem_profiles::list`).
     pub archetype: String,
+    /// Applied to every transparent element (the default). Refine per-window with `targeted_overrides`.
     #[serde(default)]
     pub glazing_overrides: GlazingOverrides,
+    /// Per-window overrides applied after `glazing_overrides`; later rules win per field.
+    #[serde(default)]
+    pub targeted_overrides: Vec<TargetedOverride>,
     #[serde(default)]
     pub options: SimulateOptions,
     /// Price/carbon factors for the cost & carbon figures. Omitted ⇒ [`Economics::uk_defaults`].
@@ -174,8 +223,10 @@ pub struct SimulateRequest {
 pub struct SimulateResponse {
     pub archetype: String,
     pub api_version: &'static str,
-    /// How many transparent building elements the overrides were applied to.
+    /// How many distinct transparent elements received at least one override (global or targeted).
     pub transparent_elements_modified: usize,
+    /// Every transparent element in the dwelling, so callers know what to target (see [`WindowInfo`]).
+    pub windows: Vec<WindowInfo>,
     /// Fuel type of each energy supply in the dwelling (supply name → fuel-type string).
     pub energy_supply_fuels: BTreeMap<String, String>,
     /// The price/carbon factors used to derive [`SimulateResponse::cost_carbon`].
@@ -224,62 +275,113 @@ impl From<HemError> for ApiError {
     }
 }
 
-/// Apply glazing overrides in place to every `BuildingElementTransparent` in the input, returning
-/// the number of elements modified. Pure and independently testable — the faithfulness guarantee
-/// (design doc Success Criterion 1) rests on this being the *only* transformation applied.
-pub fn apply_glazing_overrides(input: &mut Value, overrides: &GlazingOverrides) -> usize {
+/// Set the fields of one set of overrides on a single transparent element, returning whether any
+/// field was written. `u_value` and `thermal_resistance_construction` are mutually exclusive on the
+/// element, so setting one removes the other to keep the input valid (see the engine's `UValueInput`).
+fn apply_overrides_to_element(obj: &mut Map<String, Value>, overrides: &GlazingOverrides) -> bool {
     if overrides.is_empty() {
-        return 0;
+        return false;
     }
-    let mut modified = 0;
+    if let Some(u) = overrides.u_value {
+        obj.insert("u_value".into(), Value::from(u));
+        obj.remove("thermal_resistance_construction");
+    } else if let Some(r) = overrides.thermal_resistance_construction {
+        obj.insert("thermal_resistance_construction".into(), Value::from(r));
+        obj.remove("u_value");
+    }
+    if let Some(g) = overrides.g_value {
+        obj.insert("g_value".into(), Value::from(g));
+    }
+    if let Some(f) = overrides.frame_area_fraction {
+        obj.insert("frame_area_fraction".into(), Value::from(f));
+    }
+    true
+}
 
+/// Apply the `global` overrides to every `BuildingElementTransparent`, then each `targeted` rule in
+/// order (later rules win per field). Returns the number of *distinct* transparent elements that
+/// received at least one override. Pure and independently testable — the faithfulness guarantee
+/// (design doc Success Criterion 1) rests on this being the *only* transformation applied.
+pub fn apply_all_overrides(
+    input: &mut Value,
+    global: &GlazingOverrides,
+    targeted: &[TargetedOverride],
+) -> usize {
+    let mut modified: BTreeSet<(String, String)> = BTreeSet::new();
     let Some(zones) = input.get_mut("Zone").and_then(Value::as_object_mut) else {
         return 0;
     };
-    for zone in zones.values_mut() {
+    for (zone_name, zone) in zones.iter_mut() {
         let Some(elements) = zone
             .get_mut("BuildingElement")
             .and_then(Value::as_object_mut)
         else {
             continue;
         };
-        for element in elements.values_mut() {
+        for (element_name, element) in elements.iter_mut() {
             let is_transparent = element.get("type").and_then(Value::as_str)
                 == Some("BuildingElementTransparent");
             if !is_transparent {
                 continue;
             }
+            // Copy out before the mutable borrow; f64 is Copy so this doesn't hold the borrow.
+            let orientation = element.get("orientation360").and_then(Value::as_f64);
             let Some(obj) = element.as_object_mut() else {
                 continue;
             };
-            // u_value and thermal_resistance_construction are mutually exclusive on the element:
-            // setting one must remove the other so the input stays valid (see UValueInput).
-            if let Some(u) = overrides.u_value {
-                obj.insert("u_value".into(), Value::from(u));
-                obj.remove("thermal_resistance_construction");
-            } else if let Some(r) = overrides.thermal_resistance_construction {
-                obj.insert("thermal_resistance_construction".into(), Value::from(r));
-                obj.remove("u_value");
+            let mut touched = apply_overrides_to_element(obj, global);
+            for rule in targeted {
+                if rule.select.matches(element_name, orientation) {
+                    touched |= apply_overrides_to_element(obj, &rule.overrides);
+                }
             }
-            if let Some(g) = overrides.g_value {
-                obj.insert("g_value".into(), Value::from(g));
+            if touched {
+                modified.insert((zone_name.clone(), element_name.clone()));
             }
-            if let Some(f) = overrides.frame_area_fraction {
-                obj.insert("frame_area_fraction".into(), Value::from(f));
-            }
-            modified += 1;
         }
     }
-    modified
+    modified.len()
 }
 
-/// Assemble the final HEM input for a request: load the archetype baseline and patch it.
-/// Returns the patched JSON and the count of transparent elements touched.
+/// Backward-compatible helper: apply a single override set to every transparent element.
+pub fn apply_glazing_overrides(input: &mut Value, overrides: &GlazingOverrides) -> usize {
+    apply_all_overrides(input, overrides, &[])
+}
+
+/// List every transparent element in the input, for the response's window inventory.
+fn window_inventory(input: &Value) -> Vec<WindowInfo> {
+    let mut windows = Vec::new();
+    if let Some(zones) = input.get("Zone").and_then(Value::as_object) {
+        for (zone_name, zone) in zones {
+            let Some(elements) = zone.get("BuildingElement").and_then(Value::as_object) else {
+                continue;
+            };
+            for (element_name, element) in elements {
+                if element.get("type").and_then(Value::as_str) != Some("BuildingElementTransparent") {
+                    continue;
+                }
+                windows.push(WindowInfo {
+                    zone: zone_name.clone(),
+                    name: element_name.clone(),
+                    orientation360: element.get("orientation360").and_then(Value::as_f64),
+                    pitch: element.get("pitch").and_then(Value::as_f64),
+                });
+            }
+        }
+    }
+    windows
+}
+
+/// Assemble the final HEM input for a request: load the archetype baseline and patch it (global
+/// overrides, then targeted). Returns the patched JSON and the count of transparent elements touched.
 pub fn assemble_input(req: &SimulateRequest) -> Result<(Value, usize), ApiError> {
     req.glazing_overrides.validate()?;
+    for rule in &req.targeted_overrides {
+        rule.overrides.validate()?;
+    }
     let mut input = hem_profiles::baseline(&req.archetype)
         .ok_or_else(|| ApiError::UnknownArchetype(req.archetype.clone()))?;
-    let modified = apply_glazing_overrides(&mut input, &req.glazing_overrides);
+    let modified = apply_all_overrides(&mut input, &req.glazing_overrides, &req.targeted_overrides);
     Ok((input, modified))
 }
 
@@ -352,8 +454,9 @@ fn cost_carbon(
 /// Run one scenario end to end.
 pub fn simulate(req: &SimulateRequest) -> Result<SimulateResponse, ApiError> {
     let (input, modified) = assemble_input(req)?;
-    // Capture the supply→fuel map before `input` is moved into the engine run.
+    // Capture the supply→fuel map and window inventory before `input` is moved into the engine run.
     let energy_supply_fuels = energy_supply_fuels(&input);
+    let windows = window_inventory(&input);
     let economics_used = req.economics.clone().unwrap_or_else(Economics::uk_defaults);
 
     let weather = cibse_weather_data_to_external_conditions(BufReader::new(Cursor::new(
@@ -380,6 +483,7 @@ pub fn simulate(req: &SimulateRequest) -> Result<SimulateResponse, ApiError> {
         archetype: req.archetype.clone(),
         api_version: API_VERSION,
         transparent_elements_modified: modified,
+        windows,
         energy_supply_fuels,
         economics_used,
         cost_carbon,
@@ -401,11 +505,19 @@ fn delivered_energy_total(summary: &OutputSummary) -> Option<f64> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CompareRequest {
     pub archetype: String,
-    /// The starting glazing spec. Empty = the archetype's as-built windows.
+    /// The starting glazing spec (global). Empty = the archetype's as-built windows.
     #[serde(default)]
     pub baseline_overrides: GlazingOverrides,
-    /// The proposed/upgraded glazing spec.
+    /// Per-window refinements to the baseline side.
+    #[serde(default)]
+    pub baseline_targeted: Vec<TargetedOverride>,
+    /// The proposed/upgraded glazing spec (global). May be empty when the upgrade is expressed
+    /// entirely through `upgrade_targeted` (upgrading only specific windows).
+    #[serde(default)]
     pub upgrade_overrides: GlazingOverrides,
+    /// Per-window refinements to the upgrade side (e.g. upgrade only the north-facing windows).
+    #[serde(default)]
+    pub upgrade_targeted: Vec<TargetedOverride>,
     #[serde(default)]
     pub options: SimulateOptions,
     /// Price/carbon factors, applied identically to both sides. Omitted ⇒ [`Economics::uk_defaults`].
@@ -443,6 +555,8 @@ pub struct CompareResponse {
     pub archetype: String,
     pub api_version: &'static str,
     pub transparent_elements_modified: usize,
+    /// Every transparent element in the dwelling (identical for both sides), for targeting.
+    pub windows: Vec<WindowInfo>,
     /// Fuel type of each energy supply (identical for both sides — glazing overrides don't touch it).
     pub energy_supply_fuels: BTreeMap<String, String>,
     /// The price/carbon factors used for both sides and the delta.
@@ -462,12 +576,14 @@ pub fn compare(req: &CompareRequest) -> Result<CompareResponse, ApiError> {
     let baseline = simulate(&SimulateRequest {
         archetype: req.archetype.clone(),
         glazing_overrides: req.baseline_overrides.clone(),
+        targeted_overrides: req.baseline_targeted.clone(),
         options: req.options.clone(),
         economics: Some(economics.clone()),
     })?;
     let upgrade = simulate(&SimulateRequest {
         archetype: req.archetype.clone(),
         glazing_overrides: req.upgrade_overrides.clone(),
+        targeted_overrides: req.upgrade_targeted.clone(),
         options: req.options.clone(),
         economics: Some(economics.clone()),
     })?;
@@ -492,6 +608,7 @@ pub fn compare(req: &CompareRequest) -> Result<CompareResponse, ApiError> {
         archetype: req.archetype.clone(),
         api_version: API_VERSION,
         transparent_elements_modified: upgrade.transparent_elements_modified,
+        windows: upgrade.windows.clone(),
         energy_supply_fuels: upgrade.energy_supply_fuels.clone(),
         economics_used: economics,
         baseline: Scenario {
@@ -516,6 +633,7 @@ mod tests {
         SimulateRequest {
             archetype: "detached_demo".into(),
             glazing_overrides: overrides,
+            targeted_overrides: Vec::new(),
             options: SimulateOptions::default(),
             economics: None,
         }
@@ -559,6 +677,7 @@ mod tests {
         let e = assemble_input(&SimulateRequest {
             archetype: "nope".into(),
             glazing_overrides: Default::default(),
+            targeted_overrides: Vec::new(),
             options: Default::default(),
             economics: None,
         })
@@ -686,6 +805,7 @@ mod tests {
                 thermal_resistance_construction: Some(0.3),
                 ..Default::default()
             },
+            targeted_overrides: Vec::new(),
             options: Default::default(),
             economics: None,
         })
@@ -702,10 +822,12 @@ mod tests {
         let resp = compare(&CompareRequest {
             archetype: "detached_demo".into(),
             baseline_overrides: GlazingOverrides::default(),
+            baseline_targeted: Vec::new(),
             upgrade_overrides: GlazingOverrides {
                 u_value: Some(0.8),
                 ..Default::default()
             },
+            upgrade_targeted: Vec::new(),
             options: Default::default(),
             economics: None,
         })
@@ -741,6 +863,7 @@ mod tests {
         let resp = simulate(&SimulateRequest {
             archetype: "detached_demo".into(),
             glazing_overrides: GlazingOverrides::default(),
+            targeted_overrides: Vec::new(),
             options: Default::default(),
             economics: Some(econ),
         })
@@ -780,6 +903,7 @@ mod tests {
         let err = simulate(&SimulateRequest {
             archetype: "detached_demo".into(),
             glazing_overrides: GlazingOverrides::default(),
+            targeted_overrides: Vec::new(),
             options: Default::default(),
             economics: Some(econ),
         })
@@ -795,10 +919,12 @@ mod tests {
         let resp = compare(&CompareRequest {
             archetype: "detached_demo".into(),
             baseline_overrides: GlazingOverrides::default(),
+            baseline_targeted: Vec::new(),
             upgrade_overrides: GlazingOverrides {
                 u_value: Some(0.8),
                 ..Default::default()
             },
+            upgrade_targeted: Vec::new(),
             options: Default::default(),
             economics: None,
         })
@@ -813,5 +939,219 @@ mod tests {
             "cost saving must track the delivered-energy saving for a single-fuel dwelling"
         );
         assert_eq!(resp.delta.carbon_kg_reduction.signum(), energy.signum());
+    }
+
+    // ---- per-window / by-orientation targeting (D4) ----
+
+    fn g_of(input: &Value, name: &str) -> Option<f64> {
+        input["Zone"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|z| z["BuildingElement"].as_object().unwrap())
+            .find(|(n, _)| n.as_str() == name)
+            .and_then(|(_, e)| e.get("g_value").and_then(Value::as_f64))
+    }
+
+    #[test]
+    fn selector_matches_use_and_semantics() {
+        let by_name = WindowSelector {
+            names: vec!["window 0".into()],
+            orientations: vec![],
+        };
+        assert!(by_name.matches("window 0", Some(180.0)));
+        assert!(!by_name.matches("window 1", Some(180.0)));
+
+        let by_orientation = WindowSelector {
+            names: vec![],
+            orientations: vec![180.0],
+        };
+        assert!(by_orientation.matches("anything", Some(180.0)));
+        assert!(!by_orientation.matches("anything", Some(90.0)));
+        assert!(!by_orientation.matches("anything", None));
+
+        // Both criteria present ⇒ AND: the name matches but the orientation does not.
+        let both = WindowSelector {
+            names: vec!["window 0".into()],
+            orientations: vec![90.0],
+        };
+        assert!(!both.matches("window 0", Some(180.0)));
+
+        // Empty selector matches everything.
+        assert!(WindowSelector::default().matches("window 0", Some(180.0)));
+    }
+
+    #[test]
+    fn targeted_override_hits_only_the_named_window() {
+        let mut input = hem_profiles::baseline("detached_demo").unwrap();
+        let n = apply_all_overrides(
+            &mut input,
+            &GlazingOverrides::default(), // no global change
+            &[TargetedOverride {
+                select: WindowSelector {
+                    names: vec!["window 0".into()],
+                    orientations: vec![],
+                },
+                overrides: GlazingOverrides {
+                    g_value: Some(0.3),
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(n, 1, "only the one named window is modified");
+        assert_eq!(g_of(&input, "window 0"), Some(0.3));
+        assert_eq!(g_of(&input, "window 1"), Some(0.71), "the other window is untouched");
+    }
+
+    #[test]
+    fn targeted_override_wins_over_global_per_field() {
+        let mut input = hem_profiles::baseline("detached_demo").unwrap();
+        let n = apply_all_overrides(
+            &mut input,
+            &GlazingOverrides {
+                g_value: Some(0.5), // global: all windows to 0.5
+                ..Default::default()
+            },
+            &[TargetedOverride {
+                select: WindowSelector {
+                    names: vec!["window 0".into()],
+                    orientations: vec![],
+                },
+                overrides: GlazingOverrides {
+                    g_value: Some(0.3), // then refine window 0 to 0.3
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(n, 2, "the global override touches both windows");
+        assert_eq!(g_of(&input, "window 0"), Some(0.3), "targeted rule wins");
+        assert_eq!(g_of(&input, "window 1"), Some(0.5), "global rule applies elsewhere");
+    }
+
+    #[test]
+    fn targeting_by_orientation_selects_matching_windows() {
+        // Both flat_nat_vent windows selected by their shared orientation; a non-matching
+        // orientation selects none.
+        let mut input = hem_profiles::baseline("flat_nat_vent").unwrap();
+        let n = apply_all_overrides(
+            &mut input,
+            &GlazingOverrides::default(),
+            &[TargetedOverride {
+                select: WindowSelector {
+                    names: vec![],
+                    orientations: vec![90.0],
+                },
+                overrides: GlazingOverrides {
+                    u_value: Some(0.8),
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(n, 4, "all four east-facing windows match");
+
+        let mut input2 = hem_profiles::baseline("flat_nat_vent").unwrap();
+        let none = apply_all_overrides(
+            &mut input2,
+            &GlazingOverrides::default(),
+            &[TargetedOverride {
+                select: WindowSelector {
+                    names: vec![],
+                    orientations: vec![270.0],
+                },
+                overrides: GlazingOverrides {
+                    u_value: Some(0.8),
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(none, 0, "no window faces 270°");
+    }
+
+    #[test]
+    fn global_and_targeted_keep_u_and_resistance_mutually_exclusive() {
+        // Global sets u_value (removing the archetype's resistance); a targeted rule then sets a
+        // resistance on one window (removing that window's u_value). Each window ends with exactly one.
+        let mut input = hem_profiles::baseline("detached_demo").unwrap();
+        apply_all_overrides(
+            &mut input,
+            &GlazingOverrides {
+                u_value: Some(1.0),
+                ..Default::default()
+            },
+            &[TargetedOverride {
+                select: WindowSelector {
+                    names: vec!["window 0".into()],
+                    orientations: vec![],
+                },
+                overrides: GlazingOverrides {
+                    thermal_resistance_construction: Some(0.2),
+                    ..Default::default()
+                },
+            }],
+        );
+        let el = |name: &str| {
+            input["Zone"]
+                .as_object()
+                .unwrap()
+                .values()
+                .flat_map(|z| z["BuildingElement"].as_object().unwrap())
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(_, e)| e.clone())
+                .unwrap()
+        };
+        let w0 = el("window 0");
+        assert_eq!(w0.get("thermal_resistance_construction").and_then(Value::as_f64), Some(0.2));
+        assert!(w0.get("u_value").is_none(), "targeted resistance removes u_value on that window");
+        let w1 = el("window 1");
+        assert_eq!(w1.get("u_value").and_then(Value::as_f64), Some(1.0));
+        assert!(w1.get("thermal_resistance_construction").is_none(), "global u_value removes resistance");
+    }
+
+    #[test]
+    fn window_inventory_lists_every_transparent_element() {
+        let input = hem_profiles::baseline("flat_nat_vent").unwrap();
+        let windows = window_inventory(&input);
+        assert_eq!(windows.len(), 4);
+        let names: Vec<&str> = windows.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.contains(&"living window W03"));
+        assert!(windows.iter().all(|w| w.orientation360 == Some(90.0)));
+        assert!(windows.iter().all(|w| w.pitch == Some(90.0)));
+    }
+
+    /// A compare request that upgrades only specific windows (via `upgrade_targeted`, with no global
+    /// `upgrade_overrides`) must deserialize — the global upgrade fields are optional.
+    #[test]
+    fn compare_request_deserializes_with_only_targeted_upgrade() {
+        let json = r#"{
+            "archetype": "flat_nat_vent",
+            "upgrade_targeted": [
+                { "select": { "names": ["living window W03"] }, "overrides": { "u_value": 0.8 } }
+            ]
+        }"#;
+        let req: CompareRequest = serde_json::from_str(json).expect("must parse without upgrade_overrides");
+        assert!(req.upgrade_overrides.is_empty());
+        assert_eq!(req.upgrade_targeted.len(), 1);
+        assert_eq!(req.upgrade_targeted[0].select.names, vec!["living window W03"]);
+    }
+
+    #[test]
+    fn targeted_override_with_both_keys_is_rejected() {
+        let err = assemble_input(&SimulateRequest {
+            archetype: "detached_demo".into(),
+            glazing_overrides: GlazingOverrides::default(),
+            targeted_overrides: vec![TargetedOverride {
+                select: WindowSelector::default(),
+                overrides: GlazingOverrides {
+                    u_value: Some(1.2),
+                    thermal_resistance_construction: Some(0.3),
+                    ..Default::default()
+                },
+            }],
+            options: Default::default(),
+            economics: None,
+        })
+        .unwrap_err();
+        assert!(matches!(err, ApiError::InvalidInput(_)));
+        assert!(err.is_client_error());
     }
 }
