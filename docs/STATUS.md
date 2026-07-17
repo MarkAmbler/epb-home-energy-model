@@ -81,17 +81,22 @@ source, so parity is unaffected.
 3. ~~Shading/`treatment` overrides (blinds/curtains/overhangs — design doc §6.1).~~ **DONE**
    (treatment limited to control-free/fixed-`is_open` until an archetype carries `$.Control`
    scaffolding, or we add control injection).
-4. **Realistic archetype — BLOCKED, needs a product decision (design doc D5).** Surveyed all 111
-   core demos (2026-07-17): none simulate a full year (max 7296 h), and the long-period ones are
-   engine *test fixtures*, not dwellings — space-heat of 23–48 kWh over ~300 days, several with PV
-   (which the cost model doesn't net off). They are *less* realistic than `flat_nat_vent`, not more.
-   Extending `flat_nat_vent` to 8760 h is fabrication (it carries an explicit 8760-long cold-water
-   temperature array = its half-year, not a repeating schedule). A genuinely realistic detached /
-   full-year archetype must be **authored from real dwelling parameters** — a product/data choice,
-   and unverifiable without a real-dwelling oracle (the parity oracle only covers the demos at their
-   defined periods). Do not ship a fixture dressed up as a realistic dwelling.
-   NB: the discovery also showed multi-fuel cost/carbon was untested (both archetypes are
-   electricity-only) — added a synthetic dual-fuel unit test to close that gap.
+4. Illustrative archetype — **PARTIAL / DONE within constraints.** Added `flat_new_build_uk`: the
+   `flat_nat_vent` envelope with glazing at the current UK new-build standard (whole-window U=1.4
+   W/m²K, Approved Document L 2021 England, effective 15 Jun 2023; g=0.63 modern low-e double). A
+   curated **fabric preset** (design doc G1 — non-experts pick by name), clearly labelled
+   illustrative / not a surveyed dwelling / not compliance. Baseline heat 1244.8 kWh (vs 1435.2 for
+   `flat_nat_vent`). Verified it runs and gives sensible, correct-direction figures.
+   **Why only a preset, not a new dwelling:** surveyed all 111 core demos (2026-07-17) — none run a
+   full year (max 7296 h) and the long-period ones are engine *test fixtures* (23–48 kWh space-heat
+   over ~300 days, several with PV), *less* realistic than `flat_nat_vent`. The engine does NOT cycle
+   schedules (probed: "Schedule length is less than the expected length"), so extending any short
+   demo's period means fabricating a full period of internal-gains/cold-water/control schedules.
+   Only `flat_nat_vent` has a validated long period, so any archetype must reuse its machinery;
+   safe edits are scalar fabric params only (geometry/topology surgery risks silently-wrong physics
+   with no oracle). A structurally-different (detached / full-year) dwelling needs **real dwelling
+   data (design doc D5)** or accepting fabricated schedules. NB: the survey also revealed multi-fuel
+   cost/carbon was untested — added a synthetic dual-fuel unit test to close that gap.
 5. **Weather-by-location — BLOCKED on data.** Repo bundles only London (CIBSE csv + EPW). The
    selection mechanism + `GET /weather` is easy, but real multi-location needs sourced regional EPW
    files (provenance/licensing is a user decision). Don't ship single-city dressed up as multi.
