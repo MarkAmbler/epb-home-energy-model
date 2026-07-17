@@ -109,11 +109,29 @@ and shading/treatment are API-supported but not yet in the UI.
   official engine when it lands); make the calculation engine a **pluggable backend** behind
   `hem-api` (local engine now, ECaaS later) — this is the recommended next architectural step.
 
-## Remaining work (all data/product-gated — the core code levers are done)
+## Remaining work
 
-The feature set (cost/carbon, per-window/orientation targeting, shading/treatment, weather selection,
-two illustrative archetypes, request-field hardening, CI coverage) is delivered and on `main`. What's
-left is gated on external data or product decisions, not code:
+The API feature set (cost/carbon, per-window/orientation targeting, shading/treatment, weather
+selection, two illustrative archetypes, request-field hardening) and the compare-focused web UI are
+delivered and on `main`. Work splits into UI code work (not gated) and data/product-gated items.
+
+### Next up — UI code work, NOT gated (pick up here)
+The frontend (`hem-web/src/main.rs`) currently exposes only **global** glazing overrides. The API is
+richer than the UI; the ranked follow-ups just surface existing API capability:
+
+1. **Per-window targeting in the UI** — highest value; this is where a glazing-specific tool beats a
+   single global U-value knob. The API already supports it (`targeted_overrides: [{select:{names,
+   orientations}, overrides}]` on `/compare`, and every response carries a `windows` inventory of
+   zone/name/orientation/pitch). The UI work: render the `windows` list (already fetched into the
+   `CompareResponse`), let the user add per-window/orientation override rules, and send them as
+   `upgrade_targeted`. No backend change needed. See `docs/modelling-service-api.md` §"Per-window
+   targeting".
+2. **Shading & treatment controls in the UI** — same shape (API-ready via `glazing_overrides.shading`
+   / `.treatment`, per-window targetable), smaller payoff. Note the treatment limitation: only
+   control-free (fixed `is_open`) treatments work with the current archetypes.
+3. **Single-run `/simulate` view** — optional; the API endpoint exists but the UI is compare-only.
+
+### Data / product-gated (needs an external input or decision — unchanged)
 
 1. **Real regional weather** — unblocks weather-by-location beyond London. Source regional weather
    files (provenance/licensing is a user decision), then add each as a one-line `WEATHER_SOURCES`
@@ -147,12 +165,24 @@ left is gated on external data or product decisions, not code:
   and test cleanly. Fix/replace hem-lambda's weather bundling if we base a real Lambda transport on
   `hem-api`.
 
+## Fresh-machine setup (read first if resuming on another PC)
+Local Claude Code session memory does **not** travel between machines — this file is the source of
+truth. To get going on a clean checkout:
+```bash
+# Toolchain (once):
+rustup toolchain install stable        # Rust ≥ 1.85
+rustup target add wasm32-unknown-unknown   # needed only for the hem-web frontend
+cargo install trunk                    # the WASM bundler (also fetches wasm-bindgen/wasm-opt on build)
+```
+GitHub ops in this repo have been done via the REST API + the cached git credential because `gh` was
+not installed on the previous machine — if `gh` IS installed on this one, prefer it for PRs/merges.
+
 ## How to run / verify
 ```bash
 # Frontend: build the WASM bundle, then run the server (serves UI at / + API)
-cargo install trunk                                  # one-time (wasm32 target already present)
-(cd hem-web && trunk build --release)                # outputs hem-web/dist/
+(cd hem-web && trunk build --release)                # outputs hem-web/dist/ (gitignored)
 HEM_SERVER_ADDR=127.0.0.1:8080 cargo run -p hem-server   # open http://127.0.0.1:8080/
+# Frontend dev loop with auto-rebuild: (cd hem-web && trunk serve --proxy-backend=http://127.0.0.1:8080/)
 
 # Unit tests for the product crates (this is also the modelling-service CI workflow)
 cargo test -p hem-api -p hem-profiles -p hem-server
