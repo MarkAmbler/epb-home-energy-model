@@ -98,9 +98,12 @@ source, so parity is unaffected.
    with no oracle). A structurally-different (detached / full-year) dwelling needs **real dwelling
    data (design doc D5)** or accepting fabricated schedules. NB: the survey also revealed multi-fuel
    cost/carbon was untested — added a synthetic dual-fuel unit test to close that gap.
-5. **Weather-by-location — BLOCKED on data.** Repo bundles only London (CIBSE csv + EPW). The
-   selection mechanism + `GET /weather` is easy, but real multi-location needs sourced regional EPW
-   files (provenance/licensing is a user decision). Don't ship single-city dressed up as multi.
+5. Weather-by-location — **mechanism DONE; more locations blocked on data.** Added a `weather`
+   request field (defaults to `london_cibse`), `GET /weather`, id→conditions resolution, unknown→404,
+   and the id echoed in responses. Only London is listed: the bundled CIBSE and EPW files are the
+   *same* London year (identical temps/wind/diffuse radiation — verified), so exposing both would be
+   a false choice. Adding a genuinely different location is now a one-line registry entry once a
+   real regional weather file is sourced (provenance/licensing = user decision).
 6. Pluggable engine-backend trait in `hem-api` (local vs ECaaS) — deferred until ECaaS is concrete
    (its API shape is unknown, so abstracting against it now would be guesswork).
 

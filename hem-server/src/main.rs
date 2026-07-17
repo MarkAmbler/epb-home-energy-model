@@ -12,7 +12,8 @@ use axum::{
     Router,
 };
 use hem_api::{
-    compare, simulate, ApiError, CompareRequest, CompareResponse, SimulateRequest, SimulateResponse,
+    compare, list_weather, simulate, ApiError, CompareRequest, CompareResponse, SimulateRequest,
+    SimulateResponse,
 };
 use serde_json::json;
 use std::net::SocketAddr;
@@ -24,6 +25,7 @@ async fn main() {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/archetypes", get(list_archetypes))
+        .route("/weather", get(list_weather_datasets))
         .route("/simulate", post(run_simulation))
         .route("/compare", post(run_comparison));
 
@@ -50,6 +52,11 @@ async fn healthz() -> &'static str {
 /// `GET /archetypes` — list available dwelling archetypes.
 async fn list_archetypes() -> Json<serde_json::Value> {
     Json(json!({ "archetypes": hem_profiles::list() }))
+}
+
+/// `GET /weather` — list available weather datasets selectable via a request's `weather` field.
+async fn list_weather_datasets() -> Json<serde_json::Value> {
+    Json(json!({ "weather": list_weather() }))
 }
 
 /// `POST /simulate` — assemble an input from an archetype + glazing overrides, run HEM, return the
@@ -92,7 +99,7 @@ impl ApiErrorResponse {
 impl From<ApiError> for ApiErrorResponse {
     fn from(err: ApiError) -> Self {
         let status = match &err {
-            ApiError::UnknownArchetype(_) => StatusCode::NOT_FOUND,
+            ApiError::UnknownArchetype(_) | ApiError::UnknownWeather(_) => StatusCode::NOT_FOUND,
             ApiError::InvalidInput(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Weather(_) | ApiError::Calculation(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

@@ -8,18 +8,73 @@
 use home_energy_model::errors::HemError;
 use home_energy_model::output::OutputSummary;
 use home_energy_model::output_writer::SinkOutputWriter;
-use home_energy_model::read_weather_file::cibse_weather_data_to_external_conditions;
+use home_energy_model::read_weather_file::{
+    cibse_weather_data_to_external_conditions, ExternalConditions,
+};
 use home_energy_model::{run_project_from_input_file, RunInput};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Cursor};
 
-/// Bundled Phase 1 weather. The engine's e2e parity harness runs every core demo against exactly
-/// this file, so using it here means the archetype is exercised the same way it is validated
-/// (design doc §6.3). Location-selectable weather is a Phase 2 concern.
+/// Bundled CIBSE London weather. The engine's e2e parity harness runs every core demo against
+/// exactly this file, so it is the default (an archetype is exercised the same way it is validated,
+/// design doc §6.3).
 const LONDON_CIBSE_WEATHER: &str =
     include_str!("../../examples/weather_data/London_weather_CIBSE_format.csv");
+
+/// The weather dataset used when a request does not specify one.
+pub const DEFAULT_WEATHER: &str = "london_cibse";
+
+/// A bundled, selectable weather dataset.
+struct WeatherSource {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    data: &'static str,
+}
+
+/// Bundled weather datasets. Only London is available today — the repo ships no other location, and
+/// its bundled CIBSE and EPW files are the *same* London year (identical temperatures/wind/diffuse
+/// radiation), so exposing both would be a false choice. This slice is the extension point: adding a
+/// genuinely different location (once its weather file is sourced) is a one-line entry here.
+const WEATHER_SOURCES: &[WeatherSource] = &[WeatherSource {
+    id: "london_cibse",
+    name: "London (CIBSE)",
+    description: "London, CIBSE test reference year (the engine parity harness default).",
+    data: LONDON_CIBSE_WEATHER,
+}];
+
+/// A weather dataset available to callers, for a `GET /weather` listing.
+#[derive(Debug, Clone, Serialize)]
+pub struct WeatherInfo {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// List the available weather datasets.
+pub fn list_weather() -> Vec<WeatherInfo> {
+    WEATHER_SOURCES
+        .iter()
+        .map(|w| WeatherInfo {
+            id: w.id,
+            name: w.name,
+            description: w.description,
+        })
+        .collect()
+}
+
+/// Resolve a weather id to parsed external conditions. Unknown id → a client error (the caller
+/// chose a dataset that doesn't exist). All bundled datasets are CIBSE-format today.
+fn resolve_weather(id: &str) -> Result<ExternalConditions, ApiError> {
+    let source = WEATHER_SOURCES
+        .iter()
+        .find(|w| w.id == id)
+        .ok_or_else(|| ApiError::UnknownWeather(id.to_string()))?;
+    let reader = BufReader::new(Cursor::new(source.data));
+    cibse_weather_data_to_external_conditions(reader).map_err(|e| ApiError::Weather(format!("{e:?}")))
+}
 
 /// Version of this API crate, surfaced in responses for reproducibility (design doc §6.4).
 pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -233,6 +288,9 @@ pub struct SimulateRequest {
     /// Per-window overrides applied after `glazing_overrides`; later rules win per field.
     #[serde(default)]
     pub targeted_overrides: Vec<TargetedOverride>,
+    /// Weather dataset id (see [`list_weather`]). Omitted ⇒ [`DEFAULT_WEATHER`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weather: Option<String>,
     #[serde(default)]
     pub options: SimulateOptions,
     /// Price/carbon factors for the cost & carbon figures. Omitted ⇒ [`Economics::uk_defaults`].
@@ -253,6 +311,8 @@ pub struct SimulateResponse {
     pub api_version: &'static str,
     /// How many distinct transparent elements received at least one override (global or targeted).
     pub transparent_elements_modified: usize,
+    /// The weather dataset id used for this run.
+    pub weather: String,
     /// Every transparent element in the dwelling, so callers know what to target (see [`WindowInfo`]).
     pub windows: Vec<WindowInfo>,
     /// Fuel type of each energy supply in the dwelling (supply name → fuel-type string).
@@ -270,6 +330,9 @@ pub enum ApiError {
     /// Unknown archetype id — a client error (404/400).
     #[error("unknown archetype: '{0}'")]
     UnknownArchetype(String),
+    /// Unknown weather dataset id — a client error (404/400).
+    #[error("unknown weather dataset: '{0}'")]
+    UnknownWeather(String),
     /// The bundled weather data failed to parse — a server/config error (500).
     #[error("failed to load weather data: {0}")]
     Weather(String),
@@ -286,7 +349,9 @@ impl ApiError {
     pub fn is_client_error(&self) -> bool {
         matches!(
             self,
-            ApiError::UnknownArchetype(_) | ApiError::InvalidInput(_)
+            ApiError::UnknownArchetype(_)
+                | ApiError::UnknownWeather(_)
+                | ApiError::InvalidInput(_)
         )
     }
 }
@@ -493,10 +558,8 @@ pub fn simulate(req: &SimulateRequest) -> Result<SimulateResponse, ApiError> {
     let windows = window_inventory(&input);
     let economics_used = req.economics.clone().unwrap_or_else(Economics::uk_defaults);
 
-    let weather = cibse_weather_data_to_external_conditions(BufReader::new(Cursor::new(
-        LONDON_CIBSE_WEATHER,
-    )))
-    .map_err(|e| ApiError::Weather(format!("{e:?}")))?;
+    let weather_id = req.weather.as_deref().unwrap_or(DEFAULT_WEATHER);
+    let weather = resolve_weather(weather_id)?;
 
     // SinkOutputWriter is the engine's no-op writer: we take results from the returned
     // CalculationResult in memory rather than writing CSV/JSON files. output_formats = None.
@@ -517,6 +580,7 @@ pub fn simulate(req: &SimulateRequest) -> Result<SimulateResponse, ApiError> {
         archetype: req.archetype.clone(),
         api_version: API_VERSION,
         transparent_elements_modified: modified,
+        weather: weather_id.to_string(),
         windows,
         energy_supply_fuels,
         economics_used,
@@ -553,6 +617,9 @@ pub struct CompareRequest {
     /// Per-window refinements to the upgrade side (e.g. upgrade only the north-facing windows).
     #[serde(default)]
     pub upgrade_targeted: Vec<TargetedOverride>,
+    /// Weather dataset id (see [`list_weather`]), applied to both sides. Omitted ⇒ [`DEFAULT_WEATHER`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weather: Option<String>,
     #[serde(default)]
     pub options: SimulateOptions,
     /// Price/carbon factors, applied identically to both sides. Omitted ⇒ [`Economics::uk_defaults`].
@@ -590,6 +657,8 @@ pub struct CompareResponse {
     pub archetype: String,
     pub api_version: &'static str,
     pub transparent_elements_modified: usize,
+    /// The weather dataset id used for both sides.
+    pub weather: String,
     /// Every transparent element in the dwelling (identical for both sides), for targeting.
     pub windows: Vec<WindowInfo>,
     /// Fuel type of each energy supply (identical for both sides — glazing overrides don't touch it).
@@ -612,6 +681,7 @@ pub fn compare(req: &CompareRequest) -> Result<CompareResponse, ApiError> {
         archetype: req.archetype.clone(),
         glazing_overrides: req.baseline_overrides.clone(),
         targeted_overrides: req.baseline_targeted.clone(),
+        weather: req.weather.clone(),
         options: req.options.clone(),
         economics: Some(economics.clone()),
     })?;
@@ -619,6 +689,7 @@ pub fn compare(req: &CompareRequest) -> Result<CompareResponse, ApiError> {
         archetype: req.archetype.clone(),
         glazing_overrides: req.upgrade_overrides.clone(),
         targeted_overrides: req.upgrade_targeted.clone(),
+        weather: req.weather.clone(),
         options: req.options.clone(),
         economics: Some(economics.clone()),
     })?;
@@ -643,6 +714,7 @@ pub fn compare(req: &CompareRequest) -> Result<CompareResponse, ApiError> {
         archetype: req.archetype.clone(),
         api_version: API_VERSION,
         transparent_elements_modified: upgrade.transparent_elements_modified,
+        weather: upgrade.weather.clone(),
         windows: upgrade.windows.clone(),
         energy_supply_fuels: upgrade.energy_supply_fuels.clone(),
         economics_used: economics,
@@ -669,6 +741,7 @@ mod tests {
             archetype: "detached_demo".into(),
             glazing_overrides: overrides,
             targeted_overrides: Vec::new(),
+            weather: None,
             options: SimulateOptions::default(),
             economics: None,
         }
@@ -713,6 +786,7 @@ mod tests {
             archetype: "nope".into(),
             glazing_overrides: Default::default(),
             targeted_overrides: Vec::new(),
+            weather: None,
             options: Default::default(),
             economics: None,
         })
@@ -880,6 +954,7 @@ mod tests {
                 ..Default::default()
             },
             targeted_overrides: Vec::new(),
+            weather: None,
             options: Default::default(),
             economics: None,
         })
@@ -902,6 +977,7 @@ mod tests {
                 ..Default::default()
             },
             upgrade_targeted: Vec::new(),
+            weather: None,
             options: Default::default(),
             economics: None,
         })
@@ -938,6 +1014,7 @@ mod tests {
             archetype: "detached_demo".into(),
             glazing_overrides: GlazingOverrides::default(),
             targeted_overrides: Vec::new(),
+            weather: None,
             options: Default::default(),
             economics: Some(econ),
         })
@@ -978,6 +1055,7 @@ mod tests {
             archetype: "detached_demo".into(),
             glazing_overrides: GlazingOverrides::default(),
             targeted_overrides: Vec::new(),
+            weather: None,
             options: Default::default(),
             economics: Some(econ),
         })
@@ -999,6 +1077,7 @@ mod tests {
                 ..Default::default()
             },
             upgrade_targeted: Vec::new(),
+            weather: None,
             options: Default::default(),
             economics: None,
         })
@@ -1208,6 +1287,42 @@ mod tests {
         assert_eq!(req.upgrade_targeted[0].select.names, vec!["living window W03"]);
     }
 
+    // ---- weather selection ----
+
+    #[test]
+    fn weather_list_includes_the_default() {
+        let ids: Vec<&str> = list_weather().iter().map(|w| w.id).collect();
+        assert!(!ids.is_empty());
+        assert!(ids.contains(&DEFAULT_WEATHER), "the default must be a listed dataset");
+    }
+
+    #[test]
+    fn omitted_weather_uses_and_echoes_the_default() {
+        let resp = simulate(&demo_request(GlazingOverrides::default())).expect("simulate");
+        assert_eq!(resp.weather, DEFAULT_WEATHER);
+    }
+
+    #[test]
+    fn unknown_weather_is_client_error() {
+        let mut req = demo_request(GlazingOverrides::default());
+        req.weather = Some("mars".into());
+        let err = simulate(&req).unwrap_err();
+        assert!(matches!(err, ApiError::UnknownWeather(_)));
+        assert!(err.is_client_error());
+    }
+
+    /// The default dataset must resolve and parse to a full year of weather. (The end-to-end effect
+    /// of weather on demand is verified live on `flat_nat_vent`, which relies wholly on the passed
+    /// weather — its merge replaces the input's external conditions.)
+    #[test]
+    fn default_weather_resolves_and_parses() {
+        let ec = resolve_weather(DEFAULT_WEATHER).expect("default weather must resolve");
+        assert!(
+            ec.air_temperatures.len() >= 8760,
+            "the bundled dataset must cover a full year"
+        );
+    }
+
     // ---- shading overrides (design doc §6.1) ----
 
     fn shading_of(input: &Value, name: &str) -> Value {
@@ -1382,6 +1497,7 @@ mod tests {
                     ..Default::default()
                 },
             }],
+            weather: None,
             options: Default::default(),
             economics: None,
         })
