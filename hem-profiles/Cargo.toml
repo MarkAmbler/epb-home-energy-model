@@ -1,0 +1,9 @@
+[package]
+name = "hem-profiles"
+version = "0.1.0"
+edition = "2021"
+description = "Curated HEM dwelling archetype templates (known-good baseline inputs)"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }

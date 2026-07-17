@@ -1,0 +1,15 @@
+[package]
+name = "hem-api"
+version = "0.1.0"
+edition = "2021"
+description = "Modelling-service core: assemble HEM inputs from archetypes + glazing overrides, run the engine, return structured results"
+
+[dependencies]
+home-energy-model = { path = ".." }
+hem-profiles = { path = "../hem-profiles" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
+thiserror = "2.0.18"
+
+[dev-dependencies]
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
