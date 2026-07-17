@@ -32,6 +32,7 @@ pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// gives, so it is the primary knob; setting it swaps out whichever form the archetype used. It is
 /// an error to set both (see [`GlazingOverrides::validate`]).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlazingOverrides {
     /// Whole-window thermal transmittance U (W/m²·K) — the value from a glazing datasheet.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,6 +93,7 @@ impl GlazingOverrides {
 /// Selects which transparent elements a [`TargetedOverride`] applies to. An element matches when it
 /// satisfies **every non-empty** criterion (AND); an all-empty selector matches every window.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WindowSelector {
     /// BuildingElement names to match, exact (e.g. `"living window W03"`). Empty ⇒ not filtered by name.
     #[serde(default)]
@@ -117,6 +119,7 @@ impl WindowSelector {
 /// upgrade can be refined for specific windows (e.g. "all windows to U=1.0, but the north face to
 /// U=0.8").
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TargetedOverride {
     pub select: WindowSelector,
     pub overrides: GlazingOverrides,
@@ -136,6 +139,7 @@ pub struct WindowInfo {
 
 /// Engine output-detail switches, mirroring the engine's own flags.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulateOptions {
     #[serde(default)]
     pub heat_balance: bool,
@@ -151,6 +155,7 @@ pub struct SimulateOptions {
 /// than a year (e.g. `flat_nat_vent` simulates 4380 hours), so the resulting cost/carbon are NOT
 /// annual figures unless the archetype simulates a full year.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FuelFactors {
     /// Unit price of delivered energy, GBP per kWh. Excludes standing charge.
     pub price_gbp_per_kwh: f64,
@@ -162,6 +167,7 @@ pub struct FuelFactors {
 /// and carbon (kgCO₂e). Keys are the engine's fuel-type names (snake_case, e.g. `"electricity"`,
 /// `"mains_gas"`). Caller-supplied; [`Economics::uk_defaults`] provides a documented default set.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Economics {
     /// Provenance of these factors, echoed in responses so a result is self-documenting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +223,7 @@ pub struct CostCarbon {
 
 /// A request to run one scenario.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulateRequest {
     /// Archetype id (see `hem_profiles::list`).
     pub archetype: String,
@@ -530,6 +537,7 @@ fn delivered_energy_total(summary: &OutputSummary) -> Option<f64> {
 
 /// A request to compare a baseline glazing spec against an upgraded one on the same archetype.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompareRequest {
     pub archetype: String,
     /// The starting glazing spec (global). Empty = the archetype's as-built windows.
@@ -1337,6 +1345,28 @@ mod tests {
         .unwrap_err();
         assert!(err.is_client_error(), "bad treatment must be a 4xx, got {err:?}");
         assert!(matches!(err, ApiError::InvalidInput(_)));
+    }
+
+    /// Unknown fields must be rejected, not silently dropped — a typo like `glazing_override`
+    /// (singular) or `u_valeu` would otherwise run the baseline and return a wrong-but-plausible
+    /// answer. Guards both the top level and nested override objects (`deny_unknown_fields`).
+    #[test]
+    fn unknown_request_fields_are_rejected_not_ignored() {
+        // Top-level typo: `glazing_override` (singular).
+        let top = r#"{"archetype":"flat_nat_vent","glazing_override":{"u_value":0.8}}"#;
+        assert!(
+            serde_json::from_str::<SimulateRequest>(top).is_err(),
+            "a mistyped top-level field must be rejected"
+        );
+        // Nested typo inside a known object: `u_valeu`.
+        let nested = r#"{"archetype":"flat_nat_vent","glazing_overrides":{"u_valeu":0.8}}"#;
+        assert!(
+            serde_json::from_str::<SimulateRequest>(nested).is_err(),
+            "a mistyped nested override field must be rejected"
+        );
+        // The correctly-spelled request still parses.
+        let ok = r#"{"archetype":"flat_nat_vent","glazing_overrides":{"u_value":0.8}}"#;
+        assert!(serde_json::from_str::<SimulateRequest>(ok).is_ok());
     }
 
     #[test]

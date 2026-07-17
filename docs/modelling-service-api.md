@@ -173,10 +173,15 @@ Cost and carbon come from per-fuel-type factors. Omit `economics` to use documen
 | Status | When |
 |--------|------|
 | 404 | Unknown archetype. |
-| 422 | Invalid input — mutually-exclusive glazing keys, a fuel with no factors, or a shape the engine's schema rejects. |
+| 422 | Invalid input — an **unknown/misspelt field** (requests reject unknown fields rather than silently ignoring them), mutually-exclusive glazing keys, a fuel with no factors, or a shape the engine's core schema rejects. |
 | 500 | Weather/config failure, or an engine calculation error. |
 
 Error body: `{ "error": "<message>" }`.
+
+**Known limitation:** a *schema-valid* input that fails deeper in the calculation (e.g. a window
+`treatment` that references a `$.Control` key the archetype doesn't define) surfaces as a **500**,
+even though the client caused it — the engine does not cleanly separate "your input is bad" from
+"we broke" once the input passes schema validation.
 
 ## Reproducibility
 
