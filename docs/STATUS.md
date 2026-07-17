@@ -48,11 +48,21 @@ source, so parity is unaffected.
   `baseline_targeted`/`upgrade_targeted`; `upgrade_overrides` is now optional (upgrade can be
   expressed purely by targeting). Responses carry a `windows` inventory (zone/name/orientation/pitch)
   so callers know what to target.
+- **Shading & treatment overrides** (design doc §6.1): `GlazingOverrides` gains `shading` and
+  `treatment` (both `Option<Vec<Value>>`, so both are per-window targetable). `Some(list)` replaces
+  the element's array, `Some([])` clears it, `None` leaves it. Entries pass through verbatim; the
+  engine's core schema validates the assembled input, so a malformed entry surfaces as a **422**
+  (this deliberately avoids re-encoding the unstable schema, constraint C2). Shading = overhang/
+  sidefin/reveal/obstacle geometry (self-contained). Treatment = blinds/curtains; only control-free
+  (fixed `is_open`) treatments work today — `Control_*` fields reference `$.Control` keys the current
+  archetypes don't have.
 - Live check: `flat_nat_vent`, as-built vs U=0.8/g=0.5 → space-heat demand 1435→861 kWh (~40% cut),
   cost −£150.08, carbon −101.7 kgCO₂e over the simulated period (4380 h — NOT a full year), correct
   direction. Targeting: all-4 windows U=0.8 → −735.1 kWh; 2 living-room windows only → −363.3 kWh
-  (~half, as expected); orientation `[90]` → all 4 (all face east). 22 unit tests pass
-  (`cargo test -p hem-api -p hem-profiles`).
+  (~half, as expected); orientation `[90]` → all 4 (all face east). Shading: as-built 1435 kWh,
+  shading removed 1188 kWh (more solar → less heat), deep overhang 1775 kWh (less solar → more heat),
+  monotonic and correct. Treatment: closed manual curtains all windows → +175.8 kWh heat (block
+  winter sun). 28 unit tests pass (`cargo test -p hem-api -p hem-profiles`).
 
 ## Strategic context (verified 2026-07-07)
 - HEM is NOT statutory yet: SAP **10.3** is the sole approved method at Future Homes Standard launch
@@ -68,8 +78,11 @@ source, so parity is unaffected.
 ## Recommended next steps
 1. ~~Cost & carbon figures in the `/compare` delta (not just kWh).~~ **DONE**.
 2. ~~Per-window / by-orientation targeting (D4).~~ **DONE**.
-3. Shading/`treatment` overrides (blinds/curtains/overhangs — design doc §6.1).
-4. More realistic archetypes (a true full 8760-hour year; a detached house).
+3. ~~Shading/`treatment` overrides (blinds/curtains/overhangs — design doc §6.1).~~ **DONE**
+   (treatment limited to control-free/fixed-`is_open` until an archetype carries `$.Control`
+   scaffolding, or we add control injection).
+4. More realistic archetypes (a true full 8760-hour year; a detached house). Would also unlock
+   control-referencing window treatments (auto blinds) if the archetype includes the controls.
 5. **Weather-by-location — BLOCKED on data.** Repo bundles only London (CIBSE csv + EPW). The
    selection mechanism + `GET /weather` is easy, but real multi-location needs sourced regional EPW
    files (provenance/licensing is a user decision). Don't ship single-city dressed up as multi.

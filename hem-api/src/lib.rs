@@ -45,6 +45,25 @@ pub struct GlazingOverrides {
     /// Fraction of the opening occupied by frame, 0..1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_area_fraction: Option<f64>,
+    /// Replace the window's external shading list — overhangs, side fins, reveals, and obstacles
+    /// (design doc §6.1). `Some(list)` replaces the element's entire `shading` array; `Some([])`
+    /// clears all shading; `None` leaves it unchanged. Entries are passed through verbatim and
+    /// validated by the engine's core schema, so a malformed entry surfaces as a 422 — this
+    /// deliberately avoids re-encoding the unstable input schema (constraint C2). Shape:
+    /// `{"type":"overhang"|"sidefinleft"|"sidefinright"|"reveal","depth":m,"distance":m}` or
+    /// `{"type":"obstacle","height":m,"distance":m,"transparency":0..1}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shading: Option<Vec<Value>>,
+    /// Replace the window's internal treatment list — blinds/curtains (design doc §6.1). `Some(list)`
+    /// replaces the element's `treatment`; `Some([])` removes all treatments; `None` leaves it
+    /// unchanged. Passed through verbatim and schema-validated (malformed ⇒ 422). Minimal entry:
+    /// `{"type":"blinds"|"curtains","controls":"manual"|"auto_motorised"|"manual_motorised"|
+    /// "combined_light_blind_HVAC","delta_r":m²K/W,"trans_red":0..1,"is_open":bool}`. NOTE: the
+    /// `Control_open`/`Control_opening_irrad`/`Control_closing_irrad` fields reference keys in the
+    /// archetype's `$.Control`; the current archetypes have none, so only control-free (fixed
+    /// `is_open`) treatments are usable today — a reference to a missing control will fail the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub treatment: Option<Vec<Value>>,
 }
 
 impl GlazingOverrides {
@@ -53,6 +72,8 @@ impl GlazingOverrides {
             && self.thermal_resistance_construction.is_none()
             && self.g_value.is_none()
             && self.frame_area_fraction.is_none()
+            && self.shading.is_none()
+            && self.treatment.is_none()
     }
 
     /// Reject combinations the engine cannot represent. `u_value` and
@@ -294,6 +315,12 @@ fn apply_overrides_to_element(obj: &mut Map<String, Value>, overrides: &GlazingO
     }
     if let Some(f) = overrides.frame_area_fraction {
         obj.insert("frame_area_fraction".into(), Value::from(f));
+    }
+    if let Some(shading) = &overrides.shading {
+        obj.insert("shading".into(), Value::Array(shading.clone()));
+    }
+    if let Some(treatment) = &overrides.treatment {
+        obj.insert("treatment".into(), Value::Array(treatment.clone()));
     }
     true
 }
@@ -1132,6 +1159,145 @@ mod tests {
         assert!(req.upgrade_overrides.is_empty());
         assert_eq!(req.upgrade_targeted.len(), 1);
         assert_eq!(req.upgrade_targeted[0].select.names, vec!["living window W03"]);
+    }
+
+    // ---- shading overrides (design doc §6.1) ----
+
+    fn shading_of(input: &Value, name: &str) -> Value {
+        input["Zone"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|z| z["BuildingElement"].as_object().unwrap())
+            .find(|(n, _)| n.as_str() == name)
+            .and_then(|(_, e)| e.get("shading"))
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn shading_override_replaces_the_array() {
+        // detached_demo windows start with an empty shading list.
+        let overhang = serde_json::json!({"type": "overhang", "depth": 0.6, "distance": 0.3});
+        let mut input = hem_profiles::baseline("detached_demo").unwrap();
+        let n = apply_glazing_overrides(
+            &mut input,
+            &GlazingOverrides {
+                shading: Some(vec![overhang.clone()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(n, 2);
+        assert_eq!(shading_of(&input, "window 0"), Value::Array(vec![overhang]));
+    }
+
+    #[test]
+    fn shading_can_be_cleared_and_targeted() {
+        // flat_nat_vent windows carry an overhang + two side fins; clear it on one window only.
+        let mut input = hem_profiles::baseline("flat_nat_vent").unwrap();
+        assert!(shading_of(&input, "living window W03").as_array().unwrap().len() > 0);
+        let n = apply_all_overrides(
+            &mut input,
+            &GlazingOverrides::default(),
+            &[TargetedOverride {
+                select: WindowSelector {
+                    names: vec!["living window W03".into()],
+                    orientations: vec![],
+                },
+                overrides: GlazingOverrides {
+                    shading: Some(vec![]),
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(n, 1);
+        assert_eq!(shading_of(&input, "living window W03"), serde_json::json!([]));
+        // A sibling window is untouched.
+        assert!(shading_of(&input, "living window W04").as_array().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn shading_only_override_is_not_empty() {
+        let o = GlazingOverrides {
+            shading: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(!o.is_empty(), "a shading-only override must count as a modification");
+    }
+
+    /// The engine's core schema must accept an override-supplied shading object and run to completion
+    /// with it (proves the passthrough forms valid input). The physical effect on demand is verified
+    /// live on the full-period `flat_nat_vent` archetype — the 8-step demo has negligible solar
+    /// variation, so it is the wrong fixture for a direction assertion.
+    #[test]
+    fn shading_override_runs_through_the_engine() {
+        let resp = simulate(&demo_request(GlazingOverrides {
+            shading: Some(vec![serde_json::json!({"type": "overhang", "depth": 2.0, "distance": 0.05})]),
+            ..Default::default()
+        }))
+        .expect("shaded run must be schema-valid and succeed");
+        assert!(resp.summary.space_heat_demand_total.is_finite());
+    }
+
+    /// A malformed shading entry is rejected by the engine schema as a client error (422).
+    #[test]
+    fn malformed_shading_is_client_error() {
+        let err = simulate(&demo_request(GlazingOverrides {
+            // Missing required `depth`/`distance` for an overhang.
+            shading: Some(vec![serde_json::json!({"type": "overhang"})]),
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert!(err.is_client_error(), "bad shading must be a 4xx, got {err:?}");
+        assert!(matches!(err, ApiError::InvalidInput(_)));
+    }
+
+    // ---- treatment overrides (design doc §6.1) ----
+
+    #[test]
+    fn treatment_override_replaces_the_array() {
+        let curtain = serde_json::json!({
+            "type": "curtains", "controls": "manual",
+            "delta_r": 0.1, "trans_red": 0.5, "is_open": false
+        });
+        let mut input = hem_profiles::baseline("detached_demo").unwrap();
+        let n = apply_glazing_overrides(
+            &mut input,
+            &GlazingOverrides {
+                treatment: Some(vec![curtain.clone()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(n, 2);
+        let t = input["Zone"]["zone 1"]["BuildingElement"]["window 0"]["treatment"].clone();
+        assert_eq!(t, Value::Array(vec![curtain]));
+    }
+
+    /// A control-free (fixed `is_open`) treatment must form schema-valid input and run to completion.
+    /// (Physical effect is verified live on flat_nat_vent; the 8-step demo is too short to assert it.)
+    #[test]
+    fn control_free_treatment_runs_through_the_engine() {
+        let resp = simulate(&demo_request(GlazingOverrides {
+            treatment: Some(vec![serde_json::json!({
+                "type": "blinds", "controls": "manual",
+                "delta_r": 0.08, "trans_red": 0.4, "is_open": false
+            })]),
+            ..Default::default()
+        }))
+        .expect("control-free treatment must be schema-valid and run");
+        assert!(resp.summary.space_heat_demand_total.is_finite());
+    }
+
+    #[test]
+    fn malformed_treatment_is_client_error() {
+        let err = simulate(&demo_request(GlazingOverrides {
+            // Missing required delta_r/trans_red/controls.
+            treatment: Some(vec![serde_json::json!({"type": "blinds"})]),
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert!(err.is_client_error(), "bad treatment must be a 4xx, got {err:?}");
+        assert!(matches!(err, ApiError::InvalidInput(_)));
     }
 
     #[test]
