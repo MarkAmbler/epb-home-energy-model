@@ -81,8 +81,17 @@ source, so parity is unaffected.
 3. ~~Shading/`treatment` overrides (blinds/curtains/overhangs — design doc §6.1).~~ **DONE**
    (treatment limited to control-free/fixed-`is_open` until an archetype carries `$.Control`
    scaffolding, or we add control injection).
-4. More realistic archetypes (a true full 8760-hour year; a detached house). Would also unlock
-   control-referencing window treatments (auto blinds) if the archetype includes the controls.
+4. **Realistic archetype — BLOCKED, needs a product decision (design doc D5).** Surveyed all 111
+   core demos (2026-07-17): none simulate a full year (max 7296 h), and the long-period ones are
+   engine *test fixtures*, not dwellings — space-heat of 23–48 kWh over ~300 days, several with PV
+   (which the cost model doesn't net off). They are *less* realistic than `flat_nat_vent`, not more.
+   Extending `flat_nat_vent` to 8760 h is fabrication (it carries an explicit 8760-long cold-water
+   temperature array = its half-year, not a repeating schedule). A genuinely realistic detached /
+   full-year archetype must be **authored from real dwelling parameters** — a product/data choice,
+   and unverifiable without a real-dwelling oracle (the parity oracle only covers the demos at their
+   defined periods). Do not ship a fixture dressed up as a realistic dwelling.
+   NB: the discovery also showed multi-fuel cost/carbon was untested (both archetypes are
+   electricity-only) — added a synthetic dual-fuel unit test to close that gap.
 5. **Weather-by-location — BLOCKED on data.** Repo bundles only London (CIBSE csv + EPW). The
    selection mechanism + `GET /weather` is easy, but real multi-location needs sourced regional EPW
    files (provenance/licensing is a user decision). Don't ship single-city dressed up as multi.

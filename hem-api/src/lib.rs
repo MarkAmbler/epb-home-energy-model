@@ -797,6 +797,45 @@ mod tests {
         assert!(json.contains("\"transparent_elements_modified\":2"));
     }
 
+    /// Multi-fuel cost/carbon: a dwelling on two metered fuels must be priced per fuel type, and the
+    /// engine-internal `_energy_from_environment` pseudo-supply (heat-pump ambient) must contribute
+    /// nothing. Neither shipped archetype is dual-fuel, so this exercises the path with a synthetic
+    /// summary deserialized straight into the engine's `OutputSummary`.
+    #[test]
+    fn cost_carbon_sums_across_fuels_and_skips_ambient() {
+        let summary: OutputSummary = serde_json::from_value(serde_json::json!({
+            "total_floor_area": 60.0,
+            "space_heat_demand_total": 0.0,
+            "space_cool_demand_total": 0.0,
+            "electricity_peak_consumption": {"peak": 0.0, "index": 0, "month": 1, "day": 1, "hour": 0.0},
+            "energy_supply": {},
+            "delivered_energy": {
+                "total": {"total": 100.0},
+                "mains elec": {"total": 60.0},
+                "mains gas": {"total": 40.0},
+                "_energy_from_environment": {"total": 999.0}
+            },
+            "hot_water_demand_daily_75th_percentile": {}
+        }))
+        .expect("synthetic OutputSummary must deserialize");
+
+        let supply_fuels = BTreeMap::from([
+            ("mains elec".to_string(), "electricity".to_string()),
+            ("mains gas".to_string(), "mains_gas".to_string()),
+            // Note: `_energy_from_environment` is deliberately NOT in the input's EnergySupply map,
+            // so cost_carbon must skip it (999 kWh of free ambient heat costs nothing).
+        ]);
+        let econ = Economics::uk_defaults();
+        let cc = cost_carbon(&summary, &supply_fuels, &econ).expect("multi-fuel cost");
+
+        let e = &econ.fuels["electricity"];
+        let g = &econ.fuels["mains_gas"];
+        let expected_cost = 60.0 * e.price_gbp_per_kwh + 40.0 * g.price_gbp_per_kwh;
+        let expected_carbon = 60.0 * e.carbon_kg_per_kwh + 40.0 * g.carbon_kg_per_kwh;
+        assert!((cc.cost_gbp - expected_cost).abs() < 1e-9, "cost must sum both fuels, ambient excluded");
+        assert!((cc.carbon_kg - expected_carbon).abs() < 1e-9, "carbon must sum both fuels, ambient excluded");
+    }
+
     #[test]
     fn u_value_override_replaces_thermal_resistance() {
         // The detached_demo windows are specified via thermal_resistance_construction. Supplying a
