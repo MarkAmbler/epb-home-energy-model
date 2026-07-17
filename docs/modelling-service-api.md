@@ -33,6 +33,7 @@ bundles the CIBSE London weather used by the engine's parity harness.
 |--------|---------------|---------|
 | GET    | `/healthz`    | Liveness — returns `ok`. |
 | GET    | `/archetypes` | List available dwelling archetypes. |
+| GET    | `/weather`    | List available weather datasets. |
 | POST   | `/simulate`   | Run one scenario → structured summary + cost/carbon. |
 | POST   | `/compare`    | Baseline vs upgraded glazing → both summaries + headline reductions. |
 
@@ -48,6 +49,16 @@ bundles the CIBSE London weather used by the engine's parity harness.
 | `flat_new_build_uk` | The same envelope with glazing at the current UK new-build standard (U=1.4 W/m²K, Approved Document L 2021; g=0.63). **Illustrative preset**, not a surveyed dwelling. |
 | `detached_demo` | Minimal single-zone demo, 8 timesteps. Fast test fixture — **figures are not physically meaningful.** |
 
+### GET `/weather`
+
+```json
+{ "weather": [ { "id": "london_cibse", "name": "London (CIBSE)", "description": "..." } ] }
+```
+
+Select a dataset per request via the `weather` field (below); omit it for the default
+(`london_cibse`). **Only London is bundled today** — the extension point for real location-based
+weather once more datasets are sourced (see [Weather](#weather)).
+
 ### POST `/simulate`
 
 Request (only `archetype` is required):
@@ -55,6 +66,7 @@ Request (only `archetype` is required):
 ```json
 {
   "archetype": "flat_nat_vent",
+  "weather": "london_cibse",
   "glazing_overrides": {
     "u_value": 1.2,
     "g_value": 0.5,
@@ -77,6 +89,7 @@ Response (abridged):
   "archetype": "flat_nat_vent",
   "api_version": "0.1.0",
   "transparent_elements_modified": 4,
+  "weather": "london_cibse",
   "windows": [ { "zone": "zone 1", "name": "living window W03", "orientation360": 90.0, "pitch": 90.0 }, ... ],
   "energy_supply_fuels": { "mains elec": "electricity" },
   "economics_used": { "source": "Illustrative defaults — ...", "fuels": { "electricity": { "price_gbp_per_kwh": 0.2611, "carbon_kg_per_kwh": 0.177 }, ... } },
@@ -149,6 +162,18 @@ when every non-empty criterion matches (AND); an empty selector matches all wind
 { "select": { "names": ["bed window W02"], "orientations": [90] }, "overrides": { "u_value": 0.8 } }
 ```
 
+## Weather
+
+Each request may set `weather` to a dataset id from `GET /weather`; omitting it uses the default
+(`london_cibse`). The chosen id is echoed in the response for reproducibility. An unknown id is a
+404.
+
+**Only London is available today.** The repo ships CIBSE and EnergyPlus (EPW) files for London, but
+they are the *same* London year (identical temperatures, wind, and diffuse radiation), so exposing
+both would be a false choice — only the CIBSE dataset is listed. Real location-based weather is the
+next data step: adding a genuinely different location (once its weather file is sourced, with
+provenance/licensing sorted) is a one-line registry entry in `hem-api`.
+
 ## Economics
 
 Cost and carbon come from per-fuel-type factors. Omit `economics` to use documented UK defaults
@@ -172,7 +197,7 @@ Cost and carbon come from per-fuel-type factors. Omit `economics` to use documen
 
 | Status | When |
 |--------|------|
-| 404 | Unknown archetype. |
+| 404 | Unknown archetype or unknown weather dataset. |
 | 422 | Invalid input — an **unknown/misspelt field** (requests reject unknown fields rather than silently ignoring them), mutually-exclusive glazing keys, a fuel with no factors, or a shape the engine's core schema rejects. |
 | 500 | Weather/config failure, or an engine calculation error. |
 
