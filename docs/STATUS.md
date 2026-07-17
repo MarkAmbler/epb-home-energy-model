@@ -33,8 +33,17 @@ source, so parity is unaffected.
   it has `Option`-keyed maps).
 - `hem-server` — thin Axum transport: `GET /healthz`, `GET /archetypes`, `POST /simulate`,
   `POST /compare`. CPU-bound runs go on the blocking pool.
+- **Cost & carbon** (design doc D2): `simulate`/`compare` turn delivered energy into running cost
+  (£) and carbon (kgCO₂e). Factors are per **fuel type** (`Economics`/`FuelFactors`, keyed by the
+  engine's snake_case fuel names), caller-supplied and **echoed in the response** (`economics_used`)
+  so a result is self-documenting; omitted ⇒ `Economics::uk_defaults` (Ofgem price cap 1 Jul–30 Sep
+  2026 + DESNZ/DEFRA 2025 GHG factors — illustrative, not authoritative). Unit-rate only (standing
+  charges excluded — they cancel in an A/B comparison). Engine-internal supplies
+  (`_energy_from_environment`, `_unmet_demand`) are correctly zero-costed; a real fuel with no
+  supplied factors is a 422.
 - Live check: `flat_nat_vent`, as-built vs U=0.8/g=0.5 → space-heat demand 1435→861 kWh (~40% cut),
-  correct direction. 10 unit tests pass.
+  cost −£150.08, carbon −101.7 kgCO₂e over the simulated period (4380 h — NOT a full year), correct
+  direction. 14 unit tests pass (`cargo test -p hem-api -p hem-profiles`).
 
 ## Strategic context (verified 2026-07-07)
 - HEM is NOT statutory yet: SAP **10.3** is the sole approved method at Future Homes Standard launch
@@ -48,10 +57,11 @@ source, so parity is unaffected.
   `hem-api` (local engine now, ECaaS later) — this is the recommended next architectural step.
 
 ## Recommended next steps
-1. Pluggable engine-backend trait in `hem-api` (local vs ECaaS).
-2. Cost & carbon figures in the `/compare` delta (not just kWh).
-3. Weather-by-location; per-window targeting; shading/`treatment` overrides.
-4. More realistic archetypes (a true full 8760-hour year; a detached house).
+1. ~~Cost & carbon figures in the `/compare` delta (not just kWh).~~ **DONE** (see above).
+2. Weather-by-location; per-window targeting; shading/`treatment` overrides.
+3. More realistic archetypes (a true full 8760-hour year; a detached house).
+4. Pluggable engine-backend trait in `hem-api` (local vs ECaaS) — deferred until ECaaS is concrete
+   (its API shape is unknown, so abstracting against it now would be guesswork).
 
 ## Known issues
 - `hem-lambda` does NOT compile — it `include_str!`s `../../src/weather.epw`, which doesn't exist and

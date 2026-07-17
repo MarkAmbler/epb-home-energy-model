@@ -12,6 +12,7 @@ use home_energy_model::read_weather_file::cibse_weather_data_to_external_conditi
 use home_energy_model::{run_project_from_input_file, RunInput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::{BufReader, Cursor};
 
 /// Bundled Phase 1 weather. The engine's e2e parity harness runs every core demo against exactly
@@ -76,6 +77,78 @@ pub struct SimulateOptions {
     pub detailed_output_heating_cooling: bool,
 }
 
+/// Price and carbon intensity for one fuel type, applied to delivered (metered) energy.
+///
+/// `price_gbp_per_kwh` is the **unit rate only** — it excludes fixed standing charges, which are
+/// per-day, do not depend on the glazing spec, and so cancel in a baseline-vs-upgrade comparison.
+/// Factors are applied to the delivered energy over the *simulated period*, which may be shorter
+/// than a year (e.g. `flat_nat_vent` simulates 4380 hours), so the resulting cost/carbon are NOT
+/// annual figures unless the archetype simulates a full year.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FuelFactors {
+    /// Unit price of delivered energy, GBP per kWh. Excludes standing charge.
+    pub price_gbp_per_kwh: f64,
+    /// Carbon intensity of delivered energy, kgCO₂e per kWh.
+    pub carbon_kg_per_kwh: f64,
+}
+
+/// Price and carbon factors per fuel type, used to turn delivered energy (kWh) into running cost (£)
+/// and carbon (kgCO₂e). Keys are the engine's fuel-type names (snake_case, e.g. `"electricity"`,
+/// `"mains_gas"`). Caller-supplied; [`Economics::uk_defaults`] provides a documented default set.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Economics {
+    /// Provenance of these factors, echoed in responses so a result is self-documenting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Factors keyed by engine fuel-type name.
+    pub fuels: BTreeMap<String, FuelFactors>,
+}
+
+impl Economics {
+    /// Illustrative UK defaults, used when a request omits `economics`. **Not authoritative** — a
+    /// design/sales running-cost/carbon proxy the caller is expected to override with their own
+    /// tariff and factors. Values verified 2026-07-17:
+    /// - Unit prices: Ofgem energy price cap, GB national average, direct-debit incl. VAT,
+    ///   1 Jul–30 Sep 2026 — electricity 26.11 p/kWh, mains gas 7.33 p/kWh.
+    /// - Carbon factors: UK DESNZ/DEFRA 2025 GHG conversion factors — grid electricity (generation)
+    ///   0.177 kgCO₂e/kWh; natural gas 0.18296 kgCO₂e/kWh (gross CV).
+    pub fn uk_defaults() -> Self {
+        let mut fuels = BTreeMap::new();
+        fuels.insert(
+            "electricity".to_string(),
+            FuelFactors {
+                price_gbp_per_kwh: 0.2611,
+                carbon_kg_per_kwh: 0.177,
+            },
+        );
+        fuels.insert(
+            "mains_gas".to_string(),
+            FuelFactors {
+                price_gbp_per_kwh: 0.0733,
+                carbon_kg_per_kwh: 0.18296,
+            },
+        );
+        Economics {
+            source: Some(
+                "Illustrative defaults — Ofgem price cap (GB avg, direct debit incl. VAT, \
+                 1 Jul–30 Sep 2026) and DESNZ/DEFRA 2025 GHG conversion factors. \
+                 Not authoritative; override with your own tariff/factors."
+                    .to_string(),
+            ),
+            fuels,
+        }
+    }
+}
+
+/// Running cost and carbon for one scenario, over the simulated period (see [`FuelFactors`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct CostCarbon {
+    /// Running (unit-rate) cost of delivered energy, GBP. Excludes standing charges.
+    pub cost_gbp: f64,
+    /// Carbon of delivered energy, kgCO₂e.
+    pub carbon_kg: f64,
+}
+
 /// A request to run one scenario.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SimulateRequest {
@@ -85,6 +158,9 @@ pub struct SimulateRequest {
     pub glazing_overrides: GlazingOverrides,
     #[serde(default)]
     pub options: SimulateOptions,
+    /// Price/carbon factors for the cost & carbon figures. Omitted ⇒ [`Economics::uk_defaults`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<Economics>,
 }
 
 /// A structured simulation result.
@@ -100,6 +176,12 @@ pub struct SimulateResponse {
     pub api_version: &'static str,
     /// How many transparent building elements the overrides were applied to.
     pub transparent_elements_modified: usize,
+    /// Fuel type of each energy supply in the dwelling (supply name → fuel-type string).
+    pub energy_supply_fuels: BTreeMap<String, String>,
+    /// The price/carbon factors used to derive [`SimulateResponse::cost_carbon`].
+    pub economics_used: Economics,
+    /// Running cost and carbon over the simulated period.
+    pub cost_carbon: CostCarbon,
     pub summary: OutputSummary,
 }
 
@@ -201,9 +283,72 @@ pub fn assemble_input(req: &SimulateRequest) -> Result<(Value, usize), ApiError>
     Ok((input, modified))
 }
 
+/// Map each `EnergySupply` in the input to its fuel-type string (snake_case, as the engine
+/// serialises `FuelType`). The delivered-energy summary is keyed by supply *name*, not fuel type,
+/// so this map is needed to apply per-fuel economics.
+fn energy_supply_fuels(input: &Value) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    if let Some(supplies) = input.get("EnergySupply").and_then(Value::as_object) {
+        for (name, details) in supplies {
+            if let Some(fuel) = details.get("fuel").and_then(Value::as_str) {
+                map.insert(name.clone(), fuel.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Compute running cost and carbon for a scenario from its delivered-energy summary.
+///
+/// Iterates the real per-supply rows (skipping the `"total"` aggregate), reads each supply's
+/// delivered-energy total (kWh), maps the supply to its fuel type, and applies that fuel's factors.
+/// Fails (422) if the input uses a fuel for which no factors were supplied — better to reject the
+/// request than to silently price part of the energy at zero and return a wrong headline figure.
+fn cost_carbon(
+    summary: &OutputSummary,
+    supply_fuels: &BTreeMap<String, String>,
+    econ: &Economics,
+) -> Result<CostCarbon, ApiError> {
+    let mut cost_gbp = 0.0;
+    let mut carbon_kg = 0.0;
+    for (supply, end_uses) in &summary.delivered_energy {
+        let supply = supply.as_ref();
+        if supply == "total" {
+            // The aggregate pseudo-row, not a real fuel supply — summing the real rows reproduces it.
+            continue;
+        }
+        // A real, metered fuel is one declared in the input's EnergySupply. Anything else is an
+        // engine-internal pseudo-supply (e.g. "_energy_from_environment", "_unmet_demand") that
+        // carries no meter, so it has no running cost or carbon — skip it rather than erroring.
+        let Some(fuel) = supply_fuels.get(supply).map(String::as_str) else {
+            continue;
+        };
+        // Free ambient energy harvested by a heat pump, and unmet demand, are not metered fuels
+        // even if declared, so they never contribute cost or carbon.
+        if fuel == "energy_from_environment" || fuel == "unmet_demand" {
+            continue;
+        }
+        let kwh = end_uses.get("total").copied().unwrap_or(0.0);
+        let factors = econ.fuels.get(fuel).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "no economics factors supplied for fuel type '{fuel}' (energy supply '{supply}')"
+            ))
+        })?;
+        cost_gbp += kwh * factors.price_gbp_per_kwh;
+        carbon_kg += kwh * factors.carbon_kg_per_kwh;
+    }
+    Ok(CostCarbon {
+        cost_gbp,
+        carbon_kg,
+    })
+}
+
 /// Run one scenario end to end.
 pub fn simulate(req: &SimulateRequest) -> Result<SimulateResponse, ApiError> {
     let (input, modified) = assemble_input(req)?;
+    // Capture the supply→fuel map before `input` is moved into the engine run.
+    let energy_supply_fuels = energy_supply_fuels(&input);
+    let economics_used = req.economics.clone().unwrap_or_else(Economics::uk_defaults);
 
     let weather = cibse_weather_data_to_external_conditions(BufReader::new(Cursor::new(
         LONDON_CIBSE_WEATHER,
@@ -222,11 +367,17 @@ pub fn simulate(req: &SimulateRequest) -> Result<SimulateResponse, ApiError> {
         req.options.detailed_output_heating_cooling,
     )?;
 
+    let summary = result.output.summary;
+    let cost_carbon = cost_carbon(&summary, &energy_supply_fuels, &economics_used)?;
+
     Ok(SimulateResponse {
         archetype: req.archetype.clone(),
         api_version: API_VERSION,
         transparent_elements_modified: modified,
-        summary: result.output.summary,
+        energy_supply_fuels,
+        economics_used,
+        cost_carbon,
+        summary,
     })
 }
 
@@ -251,22 +402,33 @@ pub struct CompareRequest {
     pub upgrade_overrides: GlazingOverrides,
     #[serde(default)]
     pub options: SimulateOptions,
+    /// Price/carbon factors, applied identically to both sides. Omitted ⇒ [`Economics::uk_defaults`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<Economics>,
 }
 
 /// One side of a comparison.
 #[derive(Debug, Serialize)]
 pub struct Scenario {
     pub overrides: GlazingOverrides,
+    /// Running cost and carbon for this side, over the simulated period.
+    pub cost_carbon: CostCarbon,
     pub summary: OutputSummary,
 }
 
-/// Headline reductions (baseline − upgrade), in kWh. Positive = the upgrade uses less energy.
+/// Headline reductions (baseline − upgrade). Positive = the upgrade is better (less energy, lower
+/// cost, less carbon). Energy figures are kWh, cost is GBP, carbon is kgCO₂e, all over the
+/// simulated period.
 #[derive(Debug, Serialize)]
 pub struct ComparisonDelta {
     pub space_heat_demand_reduction: f64,
     pub space_cool_demand_reduction: f64,
     /// `null` if either summary lacked a delivered-energy total.
     pub delivered_energy_reduction: Option<f64>,
+    /// Running-cost saving (GBP), using `economics_used`. Excludes standing charges.
+    pub cost_gbp_reduction: f64,
+    /// Carbon saving (kgCO₂e), using `economics_used`.
+    pub carbon_kg_reduction: f64,
 }
 
 /// The result of a baseline-vs-upgrade comparison.
@@ -275,6 +437,10 @@ pub struct CompareResponse {
     pub archetype: String,
     pub api_version: &'static str,
     pub transparent_elements_modified: usize,
+    /// Fuel type of each energy supply (identical for both sides — glazing overrides don't touch it).
+    pub energy_supply_fuels: BTreeMap<String, String>,
+    /// The price/carbon factors used for both sides and the delta.
+    pub economics_used: Economics,
     pub baseline: Scenario,
     pub upgrade: Scenario,
     pub delta: ComparisonDelta,
@@ -284,15 +450,20 @@ pub struct CompareResponse {
 /// both summaries plus the headline reductions. This is the core design/sales artifact: "what does
 /// switching to this glazing spec do to the dwelling's energy demand?"
 pub fn compare(req: &CompareRequest) -> Result<CompareResponse, ApiError> {
+    // Resolve economics once so both sides — and thus the delta — use identical factors.
+    let economics = req.economics.clone().unwrap_or_else(Economics::uk_defaults);
+
     let baseline = simulate(&SimulateRequest {
         archetype: req.archetype.clone(),
         glazing_overrides: req.baseline_overrides.clone(),
         options: req.options.clone(),
+        economics: Some(economics.clone()),
     })?;
     let upgrade = simulate(&SimulateRequest {
         archetype: req.archetype.clone(),
         glazing_overrides: req.upgrade_overrides.clone(),
         options: req.options.clone(),
+        economics: Some(economics.clone()),
     })?;
 
     let delta = ComparisonDelta {
@@ -307,18 +478,24 @@ pub fn compare(req: &CompareRequest) -> Result<CompareResponse, ApiError> {
             (Some(b), Some(u)) => Some(b - u),
             _ => None,
         },
+        cost_gbp_reduction: baseline.cost_carbon.cost_gbp - upgrade.cost_carbon.cost_gbp,
+        carbon_kg_reduction: baseline.cost_carbon.carbon_kg - upgrade.cost_carbon.carbon_kg,
     };
 
     Ok(CompareResponse {
         archetype: req.archetype.clone(),
         api_version: API_VERSION,
         transparent_elements_modified: upgrade.transparent_elements_modified,
+        energy_supply_fuels: upgrade.energy_supply_fuels.clone(),
+        economics_used: economics,
         baseline: Scenario {
             overrides: req.baseline_overrides.clone(),
+            cost_carbon: baseline.cost_carbon,
             summary: baseline.summary,
         },
         upgrade: Scenario {
             overrides: req.upgrade_overrides.clone(),
+            cost_carbon: upgrade.cost_carbon,
             summary: upgrade.summary,
         },
         delta,
@@ -334,6 +511,7 @@ mod tests {
             archetype: "detached_demo".into(),
             glazing_overrides: overrides,
             options: SimulateOptions::default(),
+            economics: None,
         }
     }
 
@@ -376,6 +554,7 @@ mod tests {
             archetype: "nope".into(),
             glazing_overrides: Default::default(),
             options: Default::default(),
+            economics: None,
         })
         .unwrap_err();
         assert!(e.is_client_error());
@@ -502,6 +681,7 @@ mod tests {
                 ..Default::default()
             },
             options: Default::default(),
+            economics: None,
         })
         .unwrap_err();
         assert!(matches!(err, ApiError::InvalidInput(_)));
@@ -521,6 +701,7 @@ mod tests {
                 ..Default::default()
             },
             options: Default::default(),
+            economics: None,
         })
         .expect("compare");
 
@@ -535,5 +716,96 @@ mod tests {
         );
         // The response must serialize (it embeds two OutputSummary values).
         serde_json::to_string(&resp).expect("compare response serializes");
+    }
+
+    /// Cost and carbon must equal delivered energy × the supplied factors. Both archetypes are
+    /// all-electric, so the whole-dwelling figures reduce to `delivered_energy_total × factor`.
+    #[test]
+    fn cost_and_carbon_are_delivered_energy_times_factors() {
+        let econ = Economics {
+            source: None,
+            fuels: BTreeMap::from([(
+                "electricity".to_string(),
+                FuelFactors {
+                    price_gbp_per_kwh: 0.30,
+                    carbon_kg_per_kwh: 0.20,
+                },
+            )]),
+        };
+        let resp = simulate(&SimulateRequest {
+            archetype: "detached_demo".into(),
+            glazing_overrides: GlazingOverrides::default(),
+            options: Default::default(),
+            economics: Some(econ),
+        })
+        .expect("simulate");
+
+        assert_eq!(resp.energy_supply_fuels.get("mains elec").map(String::as_str), Some("electricity"));
+        let kwh = delivered_energy_total(&resp.summary).expect("delivered energy total");
+        assert!(kwh > 0.0, "the demo must consume some electricity");
+        assert!((resp.cost_carbon.cost_gbp - kwh * 0.30).abs() < 1e-9);
+        assert!((resp.cost_carbon.carbon_kg - kwh * 0.20).abs() < 1e-9);
+    }
+
+    /// Omitting `economics` applies the documented UK defaults and echoes them back with provenance.
+    #[test]
+    fn omitted_economics_uses_documented_uk_defaults() {
+        let resp = simulate(&demo_request(GlazingOverrides::default())).expect("simulate");
+        assert!(resp.economics_used.source.is_some(), "defaults must carry provenance");
+        assert!(resp.economics_used.fuels.contains_key("electricity"));
+        assert!(resp.cost_carbon.cost_gbp > 0.0);
+        assert!(resp.cost_carbon.carbon_kg > 0.0);
+    }
+
+    /// A dwelling whose fuel has no supplied factors is a client error (422), not a silent zero.
+    #[test]
+    fn missing_fuel_factors_is_client_error() {
+        let econ = Economics {
+            source: None,
+            fuels: BTreeMap::from([(
+                // Not the fuel the demo uses (electricity).
+                "mains_gas".to_string(),
+                FuelFactors {
+                    price_gbp_per_kwh: 0.07,
+                    carbon_kg_per_kwh: 0.18,
+                },
+            )]),
+        };
+        let err = simulate(&SimulateRequest {
+            archetype: "detached_demo".into(),
+            glazing_overrides: GlazingOverrides::default(),
+            options: Default::default(),
+            economics: Some(econ),
+        })
+        .unwrap_err();
+        assert!(matches!(err, ApiError::InvalidInput(_)));
+        assert!(err.is_client_error());
+    }
+
+    /// The cost/carbon reductions must be finite and move in the same direction as the energy
+    /// reduction (a single-fuel dwelling, so less delivered energy ⇒ lower cost and carbon).
+    #[test]
+    fn compare_reports_consistent_cost_and_carbon_reductions() {
+        let resp = compare(&CompareRequest {
+            archetype: "detached_demo".into(),
+            baseline_overrides: GlazingOverrides::default(),
+            upgrade_overrides: GlazingOverrides {
+                u_value: Some(0.8),
+                ..Default::default()
+            },
+            options: Default::default(),
+            economics: None,
+        })
+        .expect("compare");
+
+        let energy = resp.delta.delivered_energy_reduction.expect("delivered energy reduction");
+        assert!(resp.delta.cost_gbp_reduction.is_finite());
+        assert!(resp.delta.carbon_kg_reduction.is_finite());
+        assert_eq!(
+            resp.delta.cost_gbp_reduction.signum(),
+            energy.signum(),
+            "cost saving must track the delivered-energy saving for a single-fuel dwelling"
+        );
+        assert_eq!(resp.delta.carbon_kg_reduction.signum(), energy.signum());
     }
 }
