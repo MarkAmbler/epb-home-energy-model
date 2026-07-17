@@ -17,7 +17,8 @@ every push. See git history around merge `b7dadf97`.
 ### 2. Modelling service (IN PROGRESS, branch `feat/modelling-service-phases-1-2`)
 A web-service/API layer on top of the engine so non-experts can run simulations from an archetype +
 a few glazing parameters instead of authoring the ~8,000-line HEM input JSON. Full design and scope:
-[`docs/design/modelling-service-design.md`](design/modelling-service-design.md).
+[`docs/design/modelling-service-design.md`](design/modelling-service-design.md). API reference (endpoints,
+request/response shapes, overrides, economics): [`docs/modelling-service-api.md`](modelling-service-api.md).
 
 **Architecture principle:** the engine crate stays a thin fork of upstream; ALL product code lives
 in new workspace crates (`hem-profiles`, `hem-api`, `hem-server`). Phase 1–2 changed zero engine
