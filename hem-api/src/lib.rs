@@ -304,6 +304,12 @@ fn energy_supply_fuels(input: &Value) -> BTreeMap<String, String> {
 /// delivered-energy total (kWh), maps the supply to its fuel type, and applies that fuel's factors.
 /// Fails (422) if the input uses a fuel for which no factors were supplied — better to reject the
 /// request than to silently price part of the energy at zero and return a wrong headline figure.
+///
+/// Base quantity: delivered energy is *gross consumption per fuel*, which equals metered grid import
+/// only when the dwelling has **no on-site generation** (both current archetypes do — generation and
+/// export are zero). With PV or other generation, consumption exceeds net import, so this would
+/// overstate cost; a generation-aware archetype must switch the base to `energy_supply` net import
+/// plus an export credit. Tracked as a known limitation until such an archetype exists.
 fn cost_carbon(
     summary: &OutputSummary,
     supply_fuels: &BTreeMap<String, String>,

@@ -64,6 +64,10 @@ source, so parity is unaffected.
    (its API shape is unknown, so abstracting against it now would be guesswork).
 
 ## Known issues
+- **Cost/carbon assume no on-site generation.** The cost/carbon base is delivered energy = *gross
+  consumption per fuel*, which equals metered grid import only when generation/export are zero (true
+  for both current archetypes). A PV/generation archetype would need the base switched to
+  `energy_supply` net import + an export credit. Verified boundary, not a current bug.
 - `hem-lambda` does NOT compile — it `include_str!`s `../../src/weather.epw`, which doesn't exist and
   is untracked. Pre-existing (present at `main`); CI misses it because it runs `just unit` + the
   engine e2e, not `cargo build --workspace`. `cargo build --workspace` therefore fails on this crate.
